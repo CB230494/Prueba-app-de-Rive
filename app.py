@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import re
+import math
 import unicodedata
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -13,14 +15,19 @@ from openpyxl.cell.cell import MergedCell
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.units import inch
 from reportlab.platypus import (
     SimpleDocTemplate,
     Paragraph,
     Spacer,
     Table,
     TableStyle,
+    Image as RLImage,
+    PageBreak,
+    KeepTogether,
 )
+from reportlab.graphics.shapes import Drawing, Rect, String
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -41,6 +48,9 @@ if "archivo_nombre" not in st.session_state:
 
 if "pdf_final" not in st.session_state:
     st.session_state["pdf_final"] = None
+
+if "excel_final" not in st.session_state:
+    st.session_state["excel_final"] = None
 
 if "ultimo_resumen" not in st.session_state:
     st.session_state["ultimo_resumen"] = pd.DataFrame()
@@ -406,11 +416,6 @@ def looks_like_bad_line_value(text: str) -> bool:
 
 
 def extract_line_number_from_area(ws, start_row, start_col):
-    """
-    Primero intenta leer el número desde la propia etiqueta:
-    'Linea de Accion #5'
-    Luego busca alrededor.
-    """
     own_text = clean_text(get_effective_cell_value(ws, start_row, start_col))
     own_norm = normalize_text(own_text)
 
@@ -474,10 +479,6 @@ def find_line_action_starts(ws):
 
 
 def search_value_near_keywords_multiline(ws, start_row, end_row, keywords, value_blacklist=None):
-    """
-    Busca el valor principal y además concatena texto útil de la fila siguiente
-    si forma parte de la misma problemática.
-    """
     if value_blacklist is None:
         value_blacklist = []
 
@@ -497,7 +498,6 @@ def search_value_near_keywords_multiline(ws, start_row, end_row, keywords, value
                 if base:
                     collected.append(base)
 
-                # busca continuación en la fila siguiente, misma zona
                 for rr in range(r + 1, min(ws.max_row, r + 2) + 1):
                     for cc in range(max(1, c), min(ws.max_column, c + 5) + 1):
                         extra = get_effective_cell_value(ws, rr, cc)
@@ -517,7 +517,6 @@ def search_value_near_keywords_multiline(ws, start_row, end_row, keywords, value
                         if len(extra_clean) < 4:
                             continue
 
-                        # solo agrega si parece continuación real y no repite
                         if extra_norm != normalize_text(base):
                             collected.append(extra_clean)
 
@@ -736,10 +735,6 @@ def extract_table(ws, header_row, block_end_row):
 
 
 def prepare_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convierte todas las columnas editables a texto para evitar el error
-    de incompatibilidad de tipos en st.data_editor.
-    """
     df2 = df.copy()
 
     expected_columns = [
@@ -759,6 +754,16 @@ def prepare_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df2[col] = df2[col].fillna("").astype(str)
 
     return df2[expected_columns]
+
+
+def dataframe_has_real_content(df: pd.DataFrame) -> bool:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+
+    for _, row in df.iterrows():
+        if any(str(v).strip() != "" for v in row.values):
+            return True
+    return False
 
 
 # =========================================================
@@ -840,36 +845,201 @@ def extract_blocks_from_sheet(ws):
             "nombre_vacio_en_origen": not bool(problematica_final)
         })
 
+    # filtrar líneas fantasma
+    blocks_filtrados = []
+    for b in blocks:
+        if dataframe_has_real_content(b["tabla"]):
+            blocks_filtrados.append(b)
+
     return {
         "delegacion": delegacion,
         "fecha_actualizacion": fecha_actualizacion,
-        "blocks": blocks
+        "blocks": blocks_filtrados
     }
 
 
 # =========================================================
-# PDF
+# MÉTRICAS / SEMÁFORO
 # =========================================================
+def compute_line_metrics(df: pd.DataFrame) -> dict:
+    total = 0
+    completos = 0
+    con_actividades = 0
+    sin_actividades = 0
+
+    if isinstance(df, pd.DataFrame):
+        total = len(df.index)
+
+        if "Avance (Editable)" in df.columns:
+            for v in df["Avance (Editable)"].fillna("").astype(str):
+                n = normalize_status_value(v)
+                if n == "Completado":
+                    completos += 1
+                elif n == "Con Actividades":
+                    con_actividades += 1
+                elif n == "Sin Actividades":
+                    sin_actividades += 1
+
+    porcentaje = 0.0
+    if total > 0:
+        porcentaje = ((completos + 0.5 * con_actividades) / total) * 100
+
+    if porcentaje >= 80:
+        estado = "Alto"
+        color = "#1B5E20"   # verde
+    elif porcentaje >= 50:
+        estado = "Medio"
+        color = "#EF6C00"   # naranja
+    else:
+        estado = "Bajo"
+        color = "#B71C1C"   # rojo
+
+    return {
+        "total": total,
+        "completos": completos,
+        "con_actividades": con_actividades,
+        "sin_actividades": sin_actividades,
+        "porcentaje": round(porcentaje, 1),
+        "estado": estado,
+        "color": color,
+    }
+
+
+def build_summary_dataframe(data_lineas):
+    rows = []
+
+    for _, item in data_lineas.items():
+        df = item["tabla"].copy()
+        m = compute_line_metrics(df)
+
+        rows.append({
+            "Línea": item.get("display_linea", ""),
+            "Problemática": item["info"].get("problematica", ""),
+            "Líder Estratégico": item["info"].get("lider", ""),
+            "Trimestre": item.get("trimestre", ""),
+            "Indicadores": m["total"],
+            "Completado": m["completos"],
+            "Con Actividades": m["con_actividades"],
+            "Sin Actividades": m["sin_actividades"],
+            "% Avance": m["porcentaje"],
+            "Semáforo": m["estado"],
+        })
+
+    return pd.DataFrame(rows)
+
+
+# =========================================================
+# EXCEL CONSOLIDADO
+# =========================================================
+def build_excel_export(data_lineas, delegacion_general, fecha_actualizacion=""):
+    output = BytesIO()
+
+    resumen = build_summary_dataframe(data_lineas)
+
+    detalle_rows = []
+    for _, item in data_lineas.items():
+        linea = item.get("display_linea", "")
+        problematica = item["info"].get("problematica", "")
+        lider = item["info"].get("lider", "")
+        trimestre = item.get("trimestre", "")
+        df = prepare_editor_dataframe(item["tabla"])
+
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            detalle_rows.append({
+                "Delegación": delegacion_general,
+                "Fecha de actualización": fecha_actualizacion,
+                "Línea": linea,
+                "Item": f"{linea}.{i}",
+                "Problemática": problematica,
+                "Líder Estratégico": lider,
+                "Trimestre": trimestre,
+                "Indicador": row.get("Indicador", ""),
+                "Meta": row.get("Meta (editable)", ""),
+                "Avance": row.get("Avance (Editable)", ""),
+                "Descripción": row.get("Descripción (editable)", ""),
+                "Cantidad": row.get("Cantidad (editable)", ""),
+                "Observaciones": row.get("Observaciones (Editable)", ""),
+            })
+
+    detalle_df = pd.DataFrame(detalle_rows)
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        resumen.to_excel(writer, index=False, sheet_name="Resumen")
+        detalle_df.to_excel(writer, index=False, sheet_name="Detalle")
+
+        meta_df = pd.DataFrame([{
+            "Delegación": delegacion_general,
+            "Fecha de actualización": fecha_actualizacion,
+            "Líneas guardadas": len(data_lineas),
+        }])
+        meta_df.to_excel(writer, index=False, sheet_name="Datos generales")
+
+    output.seek(0)
+    return output.getvalue()
+
+
+# =========================================================
+# PDF PROFESIONAL
+# =========================================================
+def draw_progress_bar(percent: float, width=230, height=12, fill_color="#1B5E20"):
+    percent = max(0, min(100, percent))
+    drawing = Drawing(width, height + 14)
+    drawing.add(Rect(0, 8, width, height, strokeColor=colors.HexColor("#B0BEC5"), fillColor=colors.HexColor("#ECEFF1")))
+    drawing.add(Rect(0, 8, width * (percent / 100.0), height, strokeColor=None, fillColor=colors.HexColor(fill_color)))
+    drawing.add(String(width + 8, 7, f"{percent:.1f}%", fontSize=8))
+    return drawing
+
+
+def draw_semaforo(label: str, color_hex: str):
+    drawing = Drawing(90, 18)
+    drawing.add(Rect(0, 2, 70, 12, fillColor=colors.HexColor(color_hex), strokeColor=colors.HexColor(color_hex)))
+    drawing.add(String(75, 4, label, fontSize=8))
+    return drawing
+
+
+def get_logo_path():
+    possible = [
+        Path("001.png"),
+        Path("./001.png"),
+        Path("/mount/src/001.png"),
+    ]
+    for p in possible:
+        if p.exists():
+            return str(p)
+    return None
+
+
 def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion=""):
     buffer = BytesIO()
 
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        rightMargin=25,
-        leftMargin=25,
-        topMargin=28,
-        bottomMargin=25
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=34,
+        bottomMargin=30
     )
 
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        "title_custom",
+        "title_main",
         parent=styles["Title"],
         alignment=TA_CENTER,
-        fontSize=15,
+        fontSize=19,
+        leading=23,
+        textColor=colors.HexColor("#1B5E20"),
+        spaceAfter=8
+    )
+
+    title_style2 = ParagraphStyle(
+        "title_sub",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontSize=14,
         leading=18,
+        textColor=colors.HexColor("#EF6C00"),
         spaceAfter=10
     )
 
@@ -877,53 +1047,179 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
         "normal_custom",
         parent=styles["Normal"],
         fontSize=9,
-        leading=11,
+        leading=12,
+        alignment=TA_LEFT,
         spaceAfter=4
     )
 
     small_style = ParagraphStyle(
         "small_custom",
         parent=styles["Normal"],
-        fontSize=7.4,
+        fontSize=7.6,
         leading=9
+    )
+
+    heading_style = ParagraphStyle(
+        "heading_custom",
+        parent=styles["Heading2"],
+        fontSize=12,
+        leading=15,
+        textColor=colors.HexColor("#B71C1C"),
+        spaceAfter=8
     )
 
     elements = []
 
-    elements.append(Paragraph("REPORTE TRIMESTRAL DE LÍNEAS DE ACCIÓN", title_style))
-    elements.append(Paragraph(f"<b>Delegación:</b> {safe_str(delegacion_general)}", normal_style))
+    # =========================================
+    # PORTADA
+    # =========================================
+    logo_path = get_logo_path()
+    elements.append(Spacer(1, 35))
 
-    if safe_str(fecha_actualizacion):
-        elements.append(Paragraph(f"<b>Fecha de actualización:</b> {safe_str(fecha_actualizacion)}", normal_style))
+    if logo_path:
+        try:
+            img = RLImage(logo_path, width=4.2 * inch, height=2.4 * inch)
+            img.hAlign = "CENTER"
+            elements.append(img)
+            elements.append(Spacer(1, 25))
+        except Exception:
+            pass
 
-    elements.append(Spacer(1, 8))
+    elements.append(Paragraph("REPORTE TRIMESTRAL", title_style))
+    elements.append(Paragraph("SEGUIMIENTO DE LÍNEAS DE ACCIÓN", title_style))
+    elements.append(Paragraph("Estrategia de Coordinación Estratégica", title_style2))
+    elements.append(Spacer(1, 18))
 
-    ordered_keys = list(data_lineas.keys())
+    portada_table = Table([
+        ["Delegación", safe_str(delegacion_general) or "-"],
+        ["Fecha de actualización", safe_str(fecha_actualizacion) or "-"],
+        ["Líneas incluidas", str(len(data_lineas))],
+    ], colWidths=[160, 300])
 
-    for key in ordered_keys:
-        item = data_lineas[key]
+    portada_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#1B5E20")),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("BACKGROUND", (1, 0), (1, -1), colors.HexColor("#F5F5F5")),
+        ("GRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#9E9E9E")),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+
+    elements.append(Spacer(1, 18))
+    elements.append(portada_table)
+    elements.append(Spacer(1, 40))
+
+    intro = (
+        "Este informe presenta el seguimiento trimestral de las líneas de acción registradas, "
+        "con una estructura que permite visualizar de forma clara el estado de avance, la "
+        "descripción operativa, la cantidad reportada y las observaciones asociadas a cada indicador. "
+        "La información se organiza por línea de acción, incorporando un resumen ejecutivo, "
+        "semáforo de avance y detalle consolidado para facilitar la revisión y la toma de decisiones."
+    )
+    elements.append(Paragraph(intro, normal_style))
+    elements.append(PageBreak())
+
+    # =========================================
+    # RESUMEN EJECUTIVO
+    # =========================================
+    elements.append(Paragraph("RESUMEN EJECUTIVO", heading_style))
+    resumen_df = build_summary_dataframe(data_lineas)
+
+    resumen_table_data = [[
+        "Línea", "Problemática", "Indicadores", "% Avance", "Semáforo"
+    ]]
+
+    for _, row in resumen_df.iterrows():
+        resumen_table_data.append([
+            Paragraph(safe_str(row.get("Línea", "")), small_style),
+            Paragraph(safe_str(row.get("Problemática", "")), small_style),
+            Paragraph(safe_str(row.get("Indicadores", "")), small_style),
+            Paragraph(safe_str(row.get("% Avance", "")), small_style),
+            Paragraph(safe_str(row.get("Semáforo", "")), small_style),
+        ])
+
+    resumen_table = Table(
+        resumen_table_data,
+        repeatRows=1,
+        colWidths=[50, 250, 70, 70, 80]
+    )
+    resumen_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(resumen_table)
+    elements.append(Spacer(1, 16))
+
+    # =========================================
+    # DETALLE POR LÍNEA
+    # =========================================
+    for key, item in data_lineas.items():
         info = item["info"]
-        df = item["tabla"]
-        trimestre = item["trimestre"]
+        df = prepare_editor_dataframe(item["tabla"])
+        trimestre = item.get("trimestre", "")
         display_linea = item.get("display_linea", key)
+        metrics = compute_line_metrics(df)
 
-        elements.append(Paragraph(f"<b>Línea de acción #:</b> {safe_str(display_linea)}", normal_style))
+        elements.append(Paragraph(f"LÍNEA DE ACCIÓN {safe_str(display_linea)}", heading_style))
         elements.append(Paragraph(f"<b>Problemática:</b> {safe_str(info.get('problematica', ''))}", normal_style))
         elements.append(Paragraph(f"<b>Líder Estratégico:</b> {safe_str(info.get('lider', ''))}", normal_style))
         elements.append(Paragraph(f"<b>Trimestre:</b> {safe_str(trimestre)}", normal_style))
         elements.append(Spacer(1, 6))
 
+        metric_table = Table([
+            ["Indicadores", str(metrics["total"]), "Completado", str(metrics["completos"])],
+            ["Con Actividades", str(metrics["con_actividades"]), "Sin Actividades", str(metrics["sin_actividades"])],
+        ], colWidths=[120, 60, 120, 60])
+
+        metric_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F5F5")),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EF6C00")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#1B5E20")),
+            ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+            ("TEXTCOLOR", (2, 0), (2, -1), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]))
+
+        elements.append(metric_table)
+        elements.append(Spacer(1, 8))
+
+        progress_and_semaforo = Table([
+            [draw_progress_bar(metrics["porcentaje"], fill_color=metrics["color"]), draw_semaforo(metrics["estado"], metrics["color"])]
+        ], colWidths=[300, 180])
+
+        progress_and_semaforo.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(progress_and_semaforo)
+        elements.append(Spacer(1, 10))
+
         table_data = [[
-            "Indicador",
-            "Meta",
-            "Avance",
-            "Descripción",
-            "Cantidad",
-            "Observaciones"
+            "Ítem", "Indicador", "Meta", "Avance", "Descripción", "Cantidad", "Observaciones"
         ]]
 
-        for _, row in df.iterrows():
+        for i, (_, row) in enumerate(df.iterrows(), start=1):
+            item_num = f"{display_linea}.{i}"
             table_data.append([
+                Paragraph(item_num, small_style),
                 Paragraph(safe_str(row.get("Indicador", "")), small_style),
                 Paragraph(safe_str(row.get("Meta (editable)", "")), small_style),
                 Paragraph(safe_str(row.get("Avance (Editable)", "")), small_style),
@@ -935,15 +1231,15 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
         table = Table(
             table_data,
             repeatRows=1,
-            colWidths=[112, 76, 70, 95, 65, 120]
+            colWidths=[34, 92, 55, 62, 120, 50, 117]
         )
 
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E2F3")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.2),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.1),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
@@ -952,49 +1248,13 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
         ]))
 
-        elements.append(table)
-        elements.append(Spacer(1, 12))
+        elements.append(KeepTogether([table]))
+        elements.append(Spacer(1, 14))
 
     doc.build(elements)
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
-
-
-# =========================================================
-# RESUMEN
-# =========================================================
-def build_summary_dataframe(data_lineas):
-    rows = []
-
-    for _, item in data_lineas.items():
-        df = item["tabla"].copy()
-        total_indicadores = len(df)
-
-        counts = {
-            "Completado": 0,
-            "Con Actividades": 0,
-            "Sin Actividades": 0
-        }
-
-        if "Avance (Editable)" in df.columns:
-            for value in df["Avance (Editable)"].fillna("").astype(str):
-                norm = normalize_status_value(value)
-                if norm in counts:
-                    counts[norm] += 1
-
-        rows.append({
-            "Línea": item.get("display_linea", ""),
-            "Problemática": item["info"].get("problematica", ""),
-            "Líder Estratégico": item["info"].get("lider", ""),
-            "Trimestre": item.get("trimestre", ""),
-            "Indicadores": total_indicadores,
-            "Completado": counts["Completado"],
-            "Con Actividades": counts["Con Actividades"],
-            "Sin Actividades": counts["Sin Actividades"],
-        })
-
-    return pd.DataFrame(rows)
 
 
 # =========================================================
@@ -1017,6 +1277,7 @@ if uploaded_file is not None:
             st.session_state["archivo_nombre"] = uploaded_file.name
             st.session_state["lineas_guardadas"] = {}
             st.session_state["pdf_final"] = None
+            st.session_state["excel_final"] = None
             st.session_state["ultimo_resumen"] = pd.DataFrame()
 
         file_bytes = uploaded_file.read()
@@ -1037,7 +1298,7 @@ if uploaded_file is not None:
         blocks = extraction["blocks"]
 
         if not blocks:
-            st.warning("No se encontraron bloques de líneas de acción en la hoja cargada.")
+            st.warning("No se encontraron bloques reales de líneas de acción en la hoja cargada.")
             st.stop()
 
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
@@ -1149,7 +1410,7 @@ if uploaded_file is not None:
                 )
 
             if bloque.get("nombre_vacio_en_origen"):
-                st.warning(f"La línea {linea_id} viene sin nombre en el Excel original. Puedes completarla manualmente en tu archivo base.")
+                st.warning(f"La línea {linea_id} viene sin nombre en el Excel original.")
 
             c4, c5 = st.columns([1.2, 5])
 
@@ -1167,6 +1428,14 @@ if uploaded_file is not None:
                     f"Filas detectadas del bloque: {bloque['rango_inicio']} a {bloque['rango_fin']} | "
                     f"Encabezado detectado: {bloque['header_row'] if bloque['header_row'] else '-'}"
                 )
+
+            m = compute_line_metrics(df_base)
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Indicadores", m["total"])
+            s2.metric("Completado", m["completos"])
+            s3.metric("Con Actividades", m["con_actividades"])
+            s4.metric("Sin Actividades", m["sin_actividades"])
+            s5.metric("% Avance", f"{m['porcentaje']}%")
 
             st.markdown("#### Detalle editable")
 
@@ -1208,6 +1477,7 @@ if uploaded_file is not None:
                         "trimestre": selected_trim
                     }
                     st.session_state["pdf_final"] = None
+                    st.session_state["excel_final"] = None
                     st.success(f"Línea {linea_id} guardada correctamente.")
 
             with btn2:
@@ -1215,6 +1485,7 @@ if uploaded_file is not None:
                     if save_key in st.session_state["lineas_guardadas"]:
                         del st.session_state["lineas_guardadas"][save_key]
                     st.session_state["pdf_final"] = None
+                    st.session_state["excel_final"] = None
                     st.warning(f"Línea {linea_id} restaurada a los datos detectados del Excel.")
                     st.rerun()
 
@@ -1254,6 +1525,7 @@ if uploaded_file is not None:
                     }
 
                 st.session_state["pdf_final"] = None
+                st.session_state["excel_final"] = None
                 st.success("Todas las líneas fueron guardadas correctamente.")
 
         with gbtn2:
@@ -1280,12 +1552,12 @@ if uploaded_file is not None:
         else:
             st.info("Cuando guardes líneas, aquí verás el resumen consolidado.")
 
-        st.markdown("## Reporte final")
+        st.markdown("## Reportes finales")
 
-        p1, p2 = st.columns([2.5, 5])
+        p1, p2, p3 = st.columns([2.6, 2.6, 5])
 
         with p1:
-            if st.button("Preparar PDF con todas las líneas guardadas"):
+            if st.button("Preparar PDF profesional"):
                 if not st.session_state["lineas_guardadas"]:
                     st.warning("Primero debes guardar al menos una línea.")
                 else:
@@ -1297,12 +1569,33 @@ if uploaded_file is not None:
                     st.session_state["pdf_final"] = pdf_bytes
                     st.success("PDF generado correctamente.")
 
+        with p2:
+            if st.button("Preparar Excel consolidado"):
+                if not st.session_state["lineas_guardadas"]:
+                    st.warning("Primero debes guardar al menos una línea.")
+                else:
+                    excel_bytes = build_excel_export(
+                        st.session_state["lineas_guardadas"],
+                        delegacion_general=delegacion,
+                        fecha_actualizacion=fecha_actualizacion
+                    )
+                    st.session_state["excel_final"] = excel_bytes
+                    st.success("Excel generado correctamente.")
+
         if st.session_state["pdf_final"]:
             st.download_button(
                 "Descargar PDF completo",
                 data=st.session_state["pdf_final"],
                 file_name=f"reporte_trimestral_{delegacion or 'delegacion'}.pdf",
                 mime="application/pdf"
+            )
+
+        if st.session_state["excel_final"]:
+            st.download_button(
+                "Descargar Excel consolidado",
+                data=st.session_state["excel_final"],
+                file_name=f"reporte_trimestral_{delegacion or 'delegacion'}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
         with st.expander("Resumen técnico de detección"):
