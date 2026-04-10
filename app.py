@@ -47,7 +47,6 @@ if "ultimo_resumen" not in st.session_state:
 
 # =========================================================
 # ESTILOS CSS
-# Ajustados para modo oscuro y también funcionales en claro
 # =========================================================
 st.markdown("""
 <style>
@@ -119,26 +118,8 @@ hr.soft-line {
     margin-top: 10px;
     margin-bottom: 14px;
 }
-
-div[data-testid="stDataFrame"] {
-    border-radius: 12px;
-    overflow: hidden;
-}
-
-div[data-testid="stExpander"] {
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 12px;
-}
-
-[data-testid="stSidebar"] .stMarkdown,
-[data-testid="stSidebar"] p,
-[data-testid="stSidebar"] li,
-[data-testid="stSidebar"] label {
-    color: inherit !important;
-}
 </style>
 """, unsafe_allow_html=True)
-
 
 # =========================================================
 # UTILIDADES DE TEXTO
@@ -154,14 +135,6 @@ def strip_accents(text: str) -> str:
 
 
 def normalize_text(value) -> str:
-    """
-    Normaliza texto de forma robusta:
-    - minúsculas
-    - sin tildes
-    - sin saltos de línea
-    - espacios compactados
-    - puntuación reducida
-    """
     if value is None:
         return ""
 
@@ -200,13 +173,21 @@ def is_nonempty(value) -> bool:
     return True
 
 
-# =========================================================
-# PALABRAS CLAVE ROBUSTAS
-# =========================================================
-KEY_DELEGACION = [
-    "delegacion",
-]
+def compact_join(values):
+    parts = []
+    seen = set()
+    for v in values:
+        t = clean_text(v)
+        n = normalize_text(t)
+        if t and n and n not in seen:
+            parts.append(t)
+            seen.add(n)
+    return " / ".join(parts)
 
+
+# =========================================================
+# PALABRAS CLAVE
+# =========================================================
 KEY_LINEA = [
     "linea de accion",
     "linea accion",
@@ -247,7 +228,6 @@ BAD_LINE_TEXT = [
     "observacion",
     "linea de accion",
 ]
-
 
 # =========================================================
 # UTILIDADES DE EXCEL
@@ -315,10 +295,6 @@ def get_up_nonempty(ws, row, col, max_steps=6):
 
 
 def get_near_nonempty(ws, row, col):
-    """
-    Busca un valor cercano de forma flexible.
-    Prioriza derecha, luego abajo, luego izquierda, luego arriba.
-    """
     for func, steps in [
         (get_right_nonempty, 12),
         (get_down_nonempty, 6),
@@ -354,7 +330,7 @@ def sheet_density_score(ws, max_row=220, max_col=40):
 
 
 # =========================================================
-# DETECCIÓN DE HOJA PRINCIPAL
+# DETECCIÓN DE HOJA
 # =========================================================
 def find_best_main_sheet(wb):
     candidates = []
@@ -387,8 +363,6 @@ def get_delegacion(ws):
     max_row = min(ws.max_row, 80)
     max_col = min(ws.max_column, 25)
 
-    best_candidate = ""
-
     for r in range(1, max_row + 1):
         for c in range(1, max_col + 1):
             val = get_effective_cell_value(ws, r, c)
@@ -400,18 +374,6 @@ def get_delegacion(ws):
                     cleaned = clean_text(near)
                     if normalize_text(cleaned) != "delegacion":
                         return cleaned
-
-    for r in range(1, max_row + 1):
-        row_vals = row_values(ws, r, max_col)
-        joined = normalize_text(" | ".join("" if v is None else str(v) for v in row_vals))
-        if "delegacion" in joined:
-            for v in row_vals:
-                vt = normalize_text(v)
-                if is_nonempty(v) and "delegacion" not in vt and len(vt) > 2:
-                    best_candidate = clean_text(v)
-                    break
-            if best_candidate:
-                return best_candidate
 
     return ""
 
@@ -434,7 +396,7 @@ def get_fecha_actualizacion(ws):
 
 
 # =========================================================
-# BÚSQUEDA ROBUSTA DE BLOQUES
+# LÍNEAS
 # =========================================================
 def looks_like_bad_line_value(text: str) -> bool:
     t = normalize_text(text)
@@ -444,6 +406,18 @@ def looks_like_bad_line_value(text: str) -> bool:
 
 
 def extract_line_number_from_area(ws, start_row, start_col):
+    """
+    Primero intenta leer el número desde la propia etiqueta:
+    'Linea de Accion #5'
+    Luego busca alrededor.
+    """
+    own_text = clean_text(get_effective_cell_value(ws, start_row, start_col))
+    own_norm = normalize_text(own_text)
+
+    m = re.search(r"linea\s+de\s+accion\s*#?\s*(\d+)", own_norm)
+    if m:
+        return m.group(1)
+
     candidates = []
 
     for c in range(start_col, min(ws.max_column, start_col + 10) + 1):
@@ -465,10 +439,6 @@ def extract_line_number_from_area(ws, start_row, start_col):
         m = re.search(r"(\d+(?:[.\-]\d+)?)", str(candidate))
         if m:
             return m.group(1)
-
-    short_candidates = [x for x in candidates if len(str(x).strip()) <= 40]
-    if short_candidates:
-        return str(short_candidates[0]).strip()
 
     return ""
 
@@ -503,52 +473,58 @@ def find_line_action_starts(ws):
     return cleaned
 
 
-def search_value_near_keywords(ws, start_row, end_row, keywords, value_blacklist=None):
+def search_value_near_keywords_multiline(ws, start_row, end_row, keywords, value_blacklist=None):
+    """
+    Busca el valor principal y además concatena texto útil de la fila siguiente
+    si forma parte de la misma problemática.
+    """
     if value_blacklist is None:
         value_blacklist = []
-
-    best_value = ""
-    best_score = -1
 
     for r in range(start_row, min(end_row, ws.max_row) + 1):
         for c in range(1, ws.max_column + 1):
             val = get_effective_cell_value(ws, r, c)
             txt = normalize_text(val)
 
-            local_score = sum(1 for kw in keywords if kw in txt)
-            if local_score > 0:
-                candidates = [
-                    get_right_nonempty(ws, r, c, 12),
-                    get_down_nonempty(ws, r, c, 5),
-                    get_left_nonempty(ws, r, c, 4),
-                    get_up_nonempty(ws, r, c, 2),
-                ]
+            if any(k in txt for k in keywords):
+                primary = get_right_nonempty(ws, r, c, 12)
+                if not is_nonempty(primary):
+                    primary = get_down_nonempty(ws, r, c, 3)
 
-                for cand in candidates:
-                    cand_clean = clean_text(cand)
-                    cand_norm = normalize_text(cand_clean)
+                base = clean_text(primary)
+                collected = []
 
-                    if not cand_norm:
-                        continue
-                    if cand_norm == txt:
-                        continue
-                    if any(b in cand_norm for b in value_blacklist):
-                        continue
+                if base:
+                    collected.append(base)
 
-                    bonus = 0
-                    if len(cand_clean) > 2:
-                        bonus += 1
-                    if len(cand_clean) > 8:
-                        bonus += 1
-                    if cand_norm not in keywords:
-                        bonus += 1
+                # busca continuación en la fila siguiente, misma zona
+                for rr in range(r + 1, min(ws.max_row, r + 2) + 1):
+                    for cc in range(max(1, c), min(ws.max_column, c + 5) + 1):
+                        extra = get_effective_cell_value(ws, rr, cc)
+                        extra_clean = clean_text(extra)
+                        extra_norm = normalize_text(extra_clean)
 
-                    total_score = local_score + bonus
-                    if total_score > best_score:
-                        best_score = total_score
-                        best_value = cand_clean
+                        if not extra_norm:
+                            continue
+                        if any(b in extra_norm for b in value_blacklist):
+                            continue
+                        if "linea de accion" in extra_norm:
+                            continue
+                        if "trimestre" in extra_norm:
+                            continue
+                        if "indicador" in extra_norm:
+                            continue
+                        if len(extra_clean) < 4:
+                            continue
 
-    return best_value
+                        # solo agrega si parece continuación real y no repite
+                        if extra_norm != normalize_text(base):
+                            collected.append(extra_clean)
+
+                result = compact_join(collected)
+                return result
+
+    return ""
 
 
 def detect_trimester(ws, start_row, end_row):
@@ -599,7 +575,7 @@ def detect_trimester(ws, start_row, end_row):
 
 
 # =========================================================
-# DETECCIÓN DE TABLA
+# TABLA
 # =========================================================
 def detect_header_row(ws, start_row, end_row):
     best_row = None
@@ -725,12 +701,12 @@ def extract_table(ws, header_row, block_end_row):
         cantidad = get_effective_cell_value(ws, r, header_map.get("Cantidad (editable)")) if header_map.get("Cantidad (editable)") else ""
         observaciones = get_effective_cell_value(ws, r, header_map.get("Observaciones (Editable)")) if header_map.get("Observaciones (Editable)") else ""
 
-        row_data["Indicador"] = "" if indicador is None else indicador
-        row_data["Meta (editable)"] = "" if meta is None else meta
+        row_data["Indicador"] = "" if indicador is None else str(indicador)
+        row_data["Meta (editable)"] = "" if meta is None else str(meta)
         row_data["Avance (Editable)"] = "" if avance is None else normalize_status_value(avance)
-        row_data["Descripción (editable)"] = "" if descripcion is None else descripcion
-        row_data["Cantidad (editable)"] = "" if cantidad is None else cantidad
-        row_data["Observaciones (Editable)"] = "" if observaciones is None else observaciones
+        row_data["Descripción (editable)"] = "" if descripcion is None else str(descripcion)
+        row_data["Cantidad (editable)"] = "" if cantidad is None else str(cantidad)
+        row_data["Observaciones (Editable)"] = "" if observaciones is None else str(observaciones)
 
         has_content = any(str(v).strip() != "" for v in row_data.values())
 
@@ -759,6 +735,32 @@ def extract_table(ws, header_row, block_end_row):
     return pd.DataFrame(data, columns=columns)
 
 
+def prepare_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convierte todas las columnas editables a texto para evitar el error
+    de incompatibilidad de tipos en st.data_editor.
+    """
+    df2 = df.copy()
+
+    expected_columns = [
+        "Indicador",
+        "Meta (editable)",
+        "Avance (Editable)",
+        "Descripción (editable)",
+        "Cantidad (editable)",
+        "Observaciones (Editable)"
+    ]
+
+    for col in expected_columns:
+        if col not in df2.columns:
+            df2[col] = ""
+
+    for col in expected_columns:
+        df2[col] = df2[col].fillna("").astype(str)
+
+    return df2[expected_columns]
+
+
 # =========================================================
 # EXTRACCIÓN COMPLETA
 # =========================================================
@@ -780,19 +782,17 @@ def extract_blocks_from_sheet(ws):
         start_row = start["row"]
         end_row = starts[i + 1]["row"] - 1 if i + 1 < len(starts) else ws.max_row
 
-        linea_numero = start["line_value"]
-        if not linea_numero:
-            linea_numero = str(i + 1)
+        linea_numero = start["line_value"] if start["line_value"] else str(i + 1)
 
-        problematica = search_value_near_keywords(
+        problematica = search_value_near_keywords_multiline(
             ws=ws,
             start_row=start_row,
-            end_row=min(start_row + 12, end_row),
+            end_row=min(start_row + 15, end_row),
             keywords=KEY_PROBLEMATICA,
             value_blacklist=["problematica", "lider", "trimestre", "indicador", "meta"]
         )
 
-        lider = search_value_near_keywords(
+        lider = search_value_near_keywords_multiline(
             ws=ws,
             start_row=start_row,
             end_row=min(start_row + 12, end_row),
@@ -821,17 +821,23 @@ def extract_blocks_from_sheet(ws):
             "Observaciones (Editable)": ""
         }])
 
+        tabla = prepare_editor_dataframe(tabla)
+
+        problematica_final = clean_text(problematica)
+        lider_final = clean_text(lider)
+
         blocks.append({
             "delegacion": delegacion,
             "fecha_actualizacion": fecha_actualizacion,
             "linea_accion": str(linea_numero).strip(),
-            "problematica": clean_text(problematica),
-            "lider": clean_text(lider),
+            "problematica": problematica_final if problematica_final else "Sin nombre en Excel",
+            "lider": lider_final if lider_final else "",
             "trimestre": clean_text(trimestre),
             "tabla": tabla,
             "rango_inicio": start_row,
             "rango_fin": end_row,
-            "header_row": header_row
+            "header_row": header_row,
+            "nombre_vacio_en_origen": not bool(problematica_final)
         })
 
     return {
@@ -1034,9 +1040,6 @@ if uploaded_file is not None:
             st.warning("No se encontraron bloques de líneas de acción en la hoja cargada.")
             st.stop()
 
-        # =========================================
-        # RESUMEN SUPERIOR
-        # =========================================
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
 
         with col_k1:
@@ -1083,9 +1086,6 @@ if uploaded_file is not None:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # =========================================
-        # SIDEBAR
-        # =========================================
         with st.sidebar:
             st.header("Resumen")
             st.write(f"**Archivo:** {uploaded_file.name}")
@@ -1095,14 +1095,14 @@ if uploaded_file is not None:
             st.write(f"**Líneas encontradas:** {len(blocks)}")
             st.divider()
 
-            lineas_detectadas = [f"Línea {b['linea_accion']}" for b in blocks]
             st.write("**Líneas detectadas:**")
-            for item in lineas_detectadas:
-                st.write(f"• {item}")
+            for b in blocks:
+                nombre = b["problematica"]
+                if b.get("nombre_vacio_en_origen"):
+                    st.write(f"• Línea {b['linea_accion']} — Sin nombre en Excel")
+                else:
+                    st.write(f"• Línea {b['linea_accion']} — {nombre}")
 
-        # =========================================
-        # BLOQUES
-        # =========================================
         for idx, bloque in enumerate(blocks):
             linea_id = str(bloque["linea_accion"]).strip() if bloque["linea_accion"] else str(idx + 1)
 
@@ -1116,8 +1116,9 @@ if uploaded_file is not None:
                 df_base = bloque["tabla"].copy()
                 trim_base = bloque["trimestre"] if bloque["trimestre"] in ["", "I", "II", "III", "IV"] else ""
 
-            st.markdown('<div class="line-card">', unsafe_allow_html=True)
+            df_base = prepare_editor_dataframe(df_base)
 
+            st.markdown('<div class="line-card">', unsafe_allow_html=True)
             st.markdown(f'<div class="section-title">Línea {safe_str(linea_id)}</div>', unsafe_allow_html=True)
             st.markdown('<hr class="soft-line">', unsafe_allow_html=True)
 
@@ -1146,6 +1147,9 @@ if uploaded_file is not None:
                     disabled=True,
                     key=f"lider_{block_key}"
                 )
+
+            if bloque.get("nombre_vacio_en_origen"):
+                st.warning(f"La línea {linea_id} viene sin nombre en el Excel original. Puedes completarla manualmente en tu archivo base.")
 
             c4, c5 = st.columns([1.2, 5])
 
@@ -1186,7 +1190,7 @@ if uploaded_file is not None:
                 }
             )
 
-            btn1, btn2, btn3 = st.columns([2.3, 2.4, 5])
+            btn1, btn2 = st.columns([2.3, 5])
 
             with btn1:
                 if st.button(f"Guardar / Actualizar línea {linea_id}", key=f"guardar_{block_key}"):
@@ -1200,7 +1204,7 @@ if uploaded_file is not None:
                             "rango_inicio": bloque["rango_inicio"],
                             "rango_fin": bloque["rango_fin"],
                         },
-                        "tabla": df_editado.copy(),
+                        "tabla": prepare_editor_dataframe(df_editado),
                         "trimestre": selected_trim
                     }
                     st.session_state["pdf_final"] = None
@@ -1216,9 +1220,6 @@ if uploaded_file is not None:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # =========================================
-        # GUARDADO MASIVO
-        # =========================================
         st.markdown("## Gestión general")
 
         gbtn1, gbtn2 = st.columns([2.5, 5])
@@ -1234,9 +1235,9 @@ if uploaded_file is not None:
                     tabla_value = st.session_state.get(f"tabla_{block_key}", bloque["tabla"])
 
                     if isinstance(tabla_value, pd.DataFrame):
-                        tabla_guardar = tabla_value.copy()
+                        tabla_guardar = prepare_editor_dataframe(tabla_value)
                     else:
-                        tabla_guardar = bloque["tabla"].copy()
+                        tabla_guardar = prepare_editor_dataframe(bloque["tabla"])
 
                     st.session_state["lineas_guardadas"][save_key] = {
                         "display_linea": linea_id,
@@ -1258,9 +1259,6 @@ if uploaded_file is not None:
         with gbtn2:
             st.caption("Usa esta opción si deseas guardar de una sola vez todo lo detectado y editado en pantalla.")
 
-        # =========================================
-        # LÍNEAS GUARDADAS
-        # =========================================
         st.markdown("## Líneas guardadas")
 
         if st.session_state["lineas_guardadas"]:
@@ -1273,9 +1271,6 @@ if uploaded_file is not None:
         else:
             st.info("Todavía no has guardado ninguna línea.")
 
-        # =========================================
-        # RESUMEN TABULAR
-        # =========================================
         st.markdown("## Resumen consolidado")
 
         if st.session_state["lineas_guardadas"]:
@@ -1285,9 +1280,6 @@ if uploaded_file is not None:
         else:
             st.info("Cuando guardes líneas, aquí verás el resumen consolidado.")
 
-        # =========================================
-        # PDF
-        # =========================================
         st.markdown("## Reporte final")
 
         p1, p2 = st.columns([2.5, 5])
@@ -1313,9 +1305,6 @@ if uploaded_file is not None:
                 mime="application/pdf"
             )
 
-        # =========================================
-        # TÉCNICO
-        # =========================================
         with st.expander("Resumen técnico de detección"):
             debug_rows = []
             for b in blocks:
@@ -1328,6 +1317,7 @@ if uploaded_file is not None:
                     "Fila inicio": b["rango_inicio"],
                     "Fila fin": b["rango_fin"],
                     "Fila encabezado": b["header_row"],
+                    "Nombre vacío en origen": "Sí" if b.get("nombre_vacio_en_origen") else "No"
                 })
 
             st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
