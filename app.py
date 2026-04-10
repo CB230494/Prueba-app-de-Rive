@@ -46,7 +46,8 @@ if "ultimo_resumen" not in st.session_state:
     st.session_state["ultimo_resumen"] = pd.DataFrame()
 
 # =========================================================
-# ESTILOS
+# ESTILOS CSS
+# Ajustados para modo oscuro y también funcionales en claro
 # =========================================================
 st.markdown("""
 <style>
@@ -60,56 +61,80 @@ st.markdown("""
     font-size: 2rem;
     font-weight: 700;
     margin-bottom: 0.2rem;
+    color: inherit;
 }
 
 .sub-note {
     font-size: 0.95rem;
-    color: #666;
+    color: rgba(250,250,250,0.78);
     margin-bottom: 1rem;
 }
 
 .info-card {
-    border: 1px solid #D9DDE7;
-    background: #F8FAFD;
+    border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.03);
     border-radius: 14px;
     padding: 16px 18px;
     margin-bottom: 16px;
 }
 
 .line-card {
-    border: 1px solid #DCE3ED;
+    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 14px;
     padding: 18px;
     margin-bottom: 22px;
-    background: #FFFFFF;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    background: rgba(255,255,255,0.02);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.18);
 }
 
 .section-title {
     font-size: 1.12rem;
     font-weight: 700;
     margin-bottom: 0.6rem;
+    color: inherit;
 }
 
 .kpi-box {
-    border: 1px solid #DCE3ED;
+    border: 1px solid rgba(255,255,255,0.08);
     border-radius: 12px;
     padding: 12px;
-    background: #fff;
+    background: rgba(255,255,255,0.03);
     text-align: center;
+    color: inherit;
+    min-height: 82px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
 }
 
 .small-note {
     font-size: 0.9rem;
-    color: #666;
+    color: rgba(250,250,250,0.72);
 }
 
 hr.soft-line {
     border: none;
     height: 1px;
-    background: #E6EAF0;
+    background: rgba(255,255,255,0.12);
     margin-top: 10px;
     margin-bottom: 14px;
+}
+
+div[data-testid="stDataFrame"] {
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+div[data-testid="stExpander"] {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+}
+
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] li,
+[data-testid="stSidebar"] label {
+    color: inherit !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -175,22 +200,11 @@ def is_nonempty(value) -> bool:
     return True
 
 
-def contains_any(text: str, patterns) -> bool:
-    t = normalize_text(text)
-    return any(p in t for p in patterns)
-
-
-def score_keyword_match(text: str, keywords) -> int:
-    t = normalize_text(text)
-    return sum(1 for kw in keywords if kw in t)
-
-
 # =========================================================
 # PALABRAS CLAVE ROBUSTAS
 # =========================================================
 KEY_DELEGACION = [
     "delegacion",
-    "delegacion "
 ]
 
 KEY_LINEA = [
@@ -198,7 +212,6 @@ KEY_LINEA = [
     "linea accion",
     "linea de coordinacion",
     "linea de accion #",
-    "linea de accion # ",
     "linea accion #",
 ]
 
@@ -211,24 +224,7 @@ KEY_PROBLEMATICA = [
 
 KEY_LIDER = [
     "lider estrategico",
-    "lider estrategico ",
     "lider",
-]
-
-KEY_TRIMESTRE = [
-    "trimestre",
-    "i trimestre",
-    "ii trimestre",
-    "iii trimestre",
-    "iv trimestre",
-    "1 trimestre",
-    "2 trimestre",
-    "3 trimestre",
-    "4 trimestre",
-    "primer trimestre",
-    "segundo trimestre",
-    "tercer trimestre",
-    "cuarto trimestre",
 ]
 
 KEY_HEADER_INDICADOR = ["indicador", "indicadores"]
@@ -283,13 +279,6 @@ def row_values(ws, row, max_col=None):
 
 def row_text(ws, row, max_col=None):
     vals = row_values(ws, row, max_col)
-    return " | ".join("" if v is None else str(v) for v in vals)
-
-
-def column_text(ws, col, max_row=None):
-    if max_row is None:
-        max_row = ws.max_row
-    vals = [get_effective_cell_value(ws, r, col) for r in range(1, max_row + 1)]
     return " | ".join("" if v is None else str(v) for v in vals)
 
 
@@ -395,11 +384,6 @@ def find_best_main_sheet(wb):
 # DATOS GENERALES
 # =========================================================
 def get_delegacion(ws):
-    """
-    Busca la delegación de forma robusta:
-    1. Etiqueta 'Delegación' en cualquier parte superior
-    2. También intenta detectar una fila de encabezado con delegación
-    """
     max_row = min(ws.max_row, 80)
     max_col = min(ws.max_column, 25)
 
@@ -460,15 +444,8 @@ def looks_like_bad_line_value(text: str) -> bool:
 
 
 def extract_line_number_from_area(ws, start_row, start_col):
-    """
-    Intenta extraer el número o nombre de la línea:
-    - derecha
-    - misma fila
-    - área cercana
-    """
     candidates = []
 
-    # misma fila a la derecha
     for c in range(start_col, min(ws.max_column, start_col + 10) + 1):
         val = get_effective_cell_value(ws, start_row, c)
         if is_nonempty(val):
@@ -476,7 +453,6 @@ def extract_line_number_from_area(ws, start_row, start_col):
             if not looks_like_bad_line_value(txt):
                 candidates.append(txt)
 
-    # área cercana
     for r in range(start_row, min(ws.max_row, start_row + 3) + 1):
         for c in range(max(1, start_col - 1), min(ws.max_column, start_col + 8) + 1):
             val = get_effective_cell_value(ws, r, c)
@@ -485,14 +461,12 @@ def extract_line_number_from_area(ws, start_row, start_col):
                 if not looks_like_bad_line_value(txt):
                     candidates.append(txt)
 
-    # primero intenta capturar un número
     for candidate in candidates:
         m = re.search(r"(\d+(?:[.\-]\d+)?)", str(candidate))
         if m:
             return m.group(1)
 
-    # si no, devuelve texto corto
-    short_candidates = [x for x in candidates if len(str(x).strip()) <= 18]
+    short_candidates = [x for x in candidates if len(str(x).strip()) <= 40]
     if short_candidates:
         return str(short_candidates[0]).strip()
 
@@ -518,7 +492,6 @@ def find_line_action_starts(ws):
                 })
                 break
 
-    # limpiar duplicados por filas muy cercanas
     cleaned = []
     last_row = -999
 
@@ -562,7 +535,6 @@ def search_value_near_keywords(ws, start_row, end_row, keywords, value_blacklist
                     if any(b in cand_norm for b in value_blacklist):
                         continue
 
-                    # preferir textos con contenido real
                     bonus = 0
                     if len(cand_clean) > 2:
                         bonus += 1
@@ -580,11 +552,6 @@ def search_value_near_keywords(ws, start_row, end_row, keywords, value_blacklist
 
 
 def detect_trimester(ws, start_row, end_row):
-    """
-    Detecta trimestre:
-    - valor cercano a etiqueta trimestre
-    - texto de la fila
-    """
     roman_map = {
         "i": "I",
         "ii": "II",
@@ -606,7 +573,6 @@ def detect_trimester(ws, start_row, end_row):
             txt = normalize_text(val)
 
             if "trimestre" in txt:
-                # buscar cerca
                 candidates = [
                     get_right_nonempty(ws, r, c, 5),
                     get_down_nonempty(ws, r, c, 2),
@@ -619,7 +585,6 @@ def detect_trimester(ws, start_row, end_row):
                         if re.fullmatch(rf"{re.escape(k)}", ct) or f"{k} trimestre" in ct:
                             return out
 
-                # buscar en toda la fila
                 row_txt = normalize_text(row_text(ws, r))
                 if "iv trimestre" in row_txt or "4 trimestre" in row_txt or "cuarto trimestre" in row_txt:
                     return "IV"
@@ -670,7 +635,6 @@ def detect_header_row(ws, start_row, end_row):
 
         score = sum(found.values())
 
-        # favorece filas que sí parecen encabezados de tabla completa
         if found["indicador"] and found["meta"] and found["avance"] and found["descripcion"]:
             score += 4
 
@@ -776,7 +740,6 @@ def extract_table(ws, header_row, block_end_row):
                 break
             continue
 
-        # evita repetir una fila que sea claramente un encabezado
         if normalize_text(row_data["Indicador"]) in ["indicador", "indicadores"]:
             continue
 
@@ -797,7 +760,7 @@ def extract_table(ws, header_row, block_end_row):
 
 
 # =========================================================
-# EXTRACCIÓN COMPLETA DE BLOQUES
+# EXTRACCIÓN COMPLETA
 # =========================================================
 def extract_blocks_from_sheet(ws):
     starts = find_line_action_starts(ws)
@@ -1077,13 +1040,25 @@ if uploaded_file is not None:
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
 
         with col_k1:
-            st.markdown('<div class="kpi-box"><b>Hoja detectada</b><br>' + safe_str(main_sheet) + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi-box"><b>Hoja detectada</b><br>{safe_str(main_sheet)}</div>',
+                unsafe_allow_html=True
+            )
         with col_k2:
-            st.markdown('<div class="kpi-box"><b>Líneas detectadas</b><br>' + str(len(blocks)) + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi-box"><b>Líneas detectadas</b><br>{len(blocks)}</div>',
+                unsafe_allow_html=True
+            )
         with col_k3:
-            st.markdown('<div class="kpi-box"><b>Delegación</b><br>' + (safe_str(delegacion) or "-") + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi-box"><b>Delegación</b><br>{safe_str(delegacion) or "-"}</div>',
+                unsafe_allow_html=True
+            )
         with col_k4:
-            st.markdown('<div class="kpi-box"><b>Fecha actualización</b><br>' + (safe_str(fecha_actualizacion) or "-") + '</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi-box"><b>Fecha actualización</b><br>{safe_str(fecha_actualizacion) or "-"}</div>',
+                unsafe_allow_html=True
+            )
 
         st.markdown("")
 
@@ -1091,21 +1066,19 @@ if uploaded_file is not None:
         g1, g2 = st.columns([1.2, 4])
 
         with g1:
-            st.markdown("**Delegación**")
             st.text_input(
                 "Delegación",
                 value=delegacion,
                 disabled=True,
-                label_visibility="collapsed"
+                key="delegacion_general"
             )
 
         with g2:
-            st.markdown("**Fecha de actualización**")
             st.text_input(
                 "Fecha de actualización",
                 value=fecha_actualizacion,
                 disabled=True,
-                label_visibility="collapsed"
+                key="fecha_actualizacion_general"
             )
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1152,26 +1125,26 @@ if uploaded_file is not None:
 
             with c1:
                 st.text_input(
-                    f"Línea {block_key}",
+                    "Línea de acción #",
                     value=linea_id,
                     disabled=True,
-                    label="Línea de acción #"
+                    key=f"linea_{block_key}"
                 )
 
             with c2:
                 st.text_input(
-                    f"Problemática {block_key}",
+                    "Problemática",
                     value=bloque["problematica"],
                     disabled=True,
-                    label="Problemática"
+                    key=f"problematica_{block_key}"
                 )
 
             with c3:
                 st.text_input(
-                    f"Líder {block_key}",
+                    "Líder Estratégico",
                     value=bloque["lider"],
                     disabled=True,
-                    label="Líder Estratégico"
+                    key=f"lider_{block_key}"
                 )
 
             c4, c5 = st.columns([1.2, 5])
@@ -1179,10 +1152,9 @@ if uploaded_file is not None:
             with c4:
                 trim_options = ["", "I", "II", "III", "IV"]
                 selected_trim = st.selectbox(
-                    f"Trimestre {block_key}",
+                    "Trimestre",
                     trim_options,
                     index=trim_options.index(trim_base if trim_base in trim_options else ""),
-                    label="Trimestre",
                     key=f"trim_{block_key}"
                 )
 
