@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
+import unicodedata
 from io import BytesIO
 
 import pandas as pd
@@ -21,7 +22,13 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-st.set_page_config(page_title="Seguimiento de líneas de acción", layout="wide")
+# =========================================================
+# CONFIGURACIÓN GENERAL
+# =========================================================
+st.set_page_config(
+    page_title="Seguimiento de líneas de acción",
+    layout="wide"
+)
 
 # =========================================================
 # SESSION STATE
@@ -35,16 +42,116 @@ if "archivo_nombre" not in st.session_state:
 if "pdf_final" not in st.session_state:
     st.session_state["pdf_final"] = None
 
+if "ultimo_resumen" not in st.session_state:
+    st.session_state["ultimo_resumen"] = pd.DataFrame()
+
+# =========================================================
+# ESTILOS
+# =========================================================
+st.markdown("""
+<style>
+.block-container {
+    max-width: 1550px;
+    padding-top: 1rem;
+    padding-bottom: 2rem;
+}
+
+.main-title {
+    font-size: 2rem;
+    font-weight: 700;
+    margin-bottom: 0.2rem;
+}
+
+.sub-note {
+    font-size: 0.95rem;
+    color: #666;
+    margin-bottom: 1rem;
+}
+
+.info-card {
+    border: 1px solid #D9DDE7;
+    background: #F8FAFD;
+    border-radius: 14px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+}
+
+.line-card {
+    border: 1px solid #DCE3ED;
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 22px;
+    background: #FFFFFF;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+
+.section-title {
+    font-size: 1.12rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+}
+
+.kpi-box {
+    border: 1px solid #DCE3ED;
+    border-radius: 12px;
+    padding: 12px;
+    background: #fff;
+    text-align: center;
+}
+
+.small-note {
+    font-size: 0.9rem;
+    color: #666;
+}
+
+hr.soft-line {
+    border: none;
+    height: 1px;
+    background: #E6EAF0;
+    margin-top: 10px;
+    margin-bottom: 14px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # =========================================================
 # UTILIDADES DE TEXTO
 # =========================================================
-def norm_text(value) -> str:
+def strip_accents(text: str) -> str:
+    if text is None:
+        return ""
+    text = str(text)
+    return "".join(
+        ch for ch in unicodedata.normalize("NFD", text)
+        if unicodedata.category(ch) != "Mn"
+    )
+
+
+def normalize_text(value) -> str:
+    """
+    Normaliza texto de forma robusta:
+    - minúsculas
+    - sin tildes
+    - sin saltos de línea
+    - espacios compactados
+    - puntuación reducida
+    """
     if value is None:
         return ""
-    s = str(value).strip().lower()
+
+    s = str(value)
+    s = strip_accents(s).lower()
     s = s.replace("\n", " ").replace("\r", " ")
-    s = re.sub(r"\s+", " ", s)
+    s = s.replace("°", " ")
+    s = s.replace("№", " ")
+    s = re.sub(r"[|]+", " ", s)
+    s = re.sub(r"[_]+", " ", s)
+    s = re.sub(r"[-]+", " ", s)
+    s = re.sub(r"[#]+", " # ", s)
+    s = re.sub(r"[:;,]+", " ", s)
+    s = re.sub(r"[()]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
@@ -60,15 +167,97 @@ def safe_str(value) -> str:
     return str(value).strip()
 
 
-def is_meaningful(value) -> bool:
-    return value not in (None, "")
+def is_nonempty(value) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    return True
+
+
+def contains_any(text: str, patterns) -> bool:
+    t = normalize_text(text)
+    return any(p in t for p in patterns)
+
+
+def score_keyword_match(text: str, keywords) -> int:
+    t = normalize_text(text)
+    return sum(1 for kw in keywords if kw in t)
+
+
+# =========================================================
+# PALABRAS CLAVE ROBUSTAS
+# =========================================================
+KEY_DELEGACION = [
+    "delegacion",
+    "delegacion "
+]
+
+KEY_LINEA = [
+    "linea de accion",
+    "linea accion",
+    "linea de coordinacion",
+    "linea de accion #",
+    "linea de accion # ",
+    "linea accion #",
+]
+
+KEY_PROBLEMATICA = [
+    "problematica",
+    "problematica de linea de accion",
+    "problematica de linea",
+    "problematica de la linea",
+]
+
+KEY_LIDER = [
+    "lider estrategico",
+    "lider estrategico ",
+    "lider",
+]
+
+KEY_TRIMESTRE = [
+    "trimestre",
+    "i trimestre",
+    "ii trimestre",
+    "iii trimestre",
+    "iv trimestre",
+    "1 trimestre",
+    "2 trimestre",
+    "3 trimestre",
+    "4 trimestre",
+    "primer trimestre",
+    "segundo trimestre",
+    "tercer trimestre",
+    "cuarto trimestre",
+]
+
+KEY_HEADER_INDICADOR = ["indicador", "indicadores"]
+KEY_HEADER_META = ["meta"]
+KEY_HEADER_AVANCE = ["avance"]
+KEY_HEADER_DESCRIPCION = ["descripcion", "descripcio"]
+KEY_HEADER_CANTIDAD = ["cantidad"]
+KEY_HEADER_OBSERVACIONES = ["observaciones", "observacion", "obs"]
+
+BAD_LINE_TEXT = [
+    "problematica",
+    "lider",
+    "delegacion",
+    "trimestre",
+    "indicador",
+    "meta",
+    "avance",
+    "descripcion",
+    "cantidad",
+    "observacion",
+    "linea de accion",
+]
 
 
 # =========================================================
 # UTILIDADES DE EXCEL
 # =========================================================
 def get_effective_cell_value(ws, row, col):
-    if not col:
+    if row < 1 or col < 1:
         return None
 
     cell = ws.cell(row=row, column=col)
@@ -97,32 +286,82 @@ def row_text(ws, row, max_col=None):
     return " | ".join("" if v is None else str(v) for v in vals)
 
 
-def get_right_value(ws, row, col, max_steps=8):
+def column_text(ws, col, max_row=None):
+    if max_row is None:
+        max_row = ws.max_row
+    vals = [get_effective_cell_value(ws, r, col) for r in range(1, max_row + 1)]
+    return " | ".join("" if v is None else str(v) for v in vals)
+
+
+def get_right_nonempty(ws, row, col, max_steps=12):
     for c in range(col + 1, min(ws.max_column, col + max_steps) + 1):
         val = get_effective_cell_value(ws, row, c)
-        if is_meaningful(val):
+        if is_nonempty(val):
             return val
     return ""
 
 
-def get_down_value(ws, row, col, max_steps=4):
+def get_left_nonempty(ws, row, col, max_steps=8):
+    for c in range(col - 1, max(1, col - max_steps), -1):
+        val = get_effective_cell_value(ws, row, c)
+        if is_nonempty(val):
+            return val
+    return ""
+
+
+def get_down_nonempty(ws, row, col, max_steps=6):
     for r in range(row + 1, min(ws.max_row, row + max_steps) + 1):
         val = get_effective_cell_value(ws, r, col)
-        if is_meaningful(val):
+        if is_nonempty(val):
             return val
     return ""
 
 
-def get_near_value(ws, row, col):
-    val = get_right_value(ws, row, col, max_steps=10)
-    if is_meaningful(val):
-        return val
-
-    val = get_down_value(ws, row, col, max_steps=4)
-    if is_meaningful(val):
-        return val
-
+def get_up_nonempty(ws, row, col, max_steps=6):
+    for r in range(row - 1, max(1, row - max_steps), -1):
+        val = get_effective_cell_value(ws, r, col)
+        if is_nonempty(val):
+            return val
     return ""
+
+
+def get_near_nonempty(ws, row, col):
+    """
+    Busca un valor cercano de forma flexible.
+    Prioriza derecha, luego abajo, luego izquierda, luego arriba.
+    """
+    for func, steps in [
+        (get_right_nonempty, 12),
+        (get_down_nonempty, 6),
+        (get_left_nonempty, 8),
+        (get_up_nonempty, 6),
+    ]:
+        val = func(ws, row, col, max_steps=steps)
+        if is_nonempty(val):
+            return val
+    return ""
+
+
+def sheet_density_score(ws, max_row=220, max_col=40):
+    score = 0
+    mr = min(ws.max_row, max_row)
+    mc = min(ws.max_column, max_col)
+
+    for r in range(1, mr + 1):
+        txt = normalize_text(row_text(ws, r, mc))
+        score += 8 if "linea de accion" in txt else 0
+        score += 6 if "problematica" in txt else 0
+        score += 6 if "lider estrategico" in txt or "lider" in txt else 0
+        score += 4 if "indicador" in txt else 0
+        score += 4 if "meta" in txt else 0
+        score += 4 if "avance" in txt else 0
+        score += 4 if "descripcion" in txt else 0
+        score += 4 if "cantidad" in txt else 0
+        score += 4 if "observaciones" in txt else 0
+        score += 3 if "delegacion" in txt else 0
+        score += 2 if "trimestre" in txt else 0
+
+    return score
 
 
 # =========================================================
@@ -133,36 +372,18 @@ def find_best_main_sheet(wb):
 
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        score = 0
+        score = sheet_density_score(ws)
 
-        max_row = min(ws.max_row, 250)
-        max_col = min(ws.max_column, 50)
+        name_norm = normalize_text(sheet_name)
 
-        for r in range(1, max_row + 1):
-            txt = norm_text(row_text(ws, r, max_col))
-
-            if "línea de acción" in txt or "linea de accion" in txt:
-                score += 8
-            if "problemática" in txt or "problematica" in txt:
-                score += 6
-            if "líder estratégico" in txt or "lider estrategico" in txt:
-                score += 6
-            if "indicador" in txt:
-                score += 4
-            if "meta" in txt:
-                score += 3
-            if "avance" in txt:
-                score += 3
-            if "descripción" in txt or "descripcion" in txt:
-                score += 3
-            if "cantidad" in txt:
-                score += 3
-            if "observaciones" in txt or "observación" in txt:
-                score += 2
-            if "delegación" in txt or "delegacion" in txt:
-                score += 3
-            if "trimestre" in txt:
-                score += 2
+        if "informe de avance" in name_norm:
+            score += 50
+        if "informe" in name_norm:
+            score += 20
+        if "avance" in name_norm:
+            score += 20
+        if "dashboard" in name_norm or "datos" in name_norm or "sumatoria" in name_norm:
+            score -= 20
 
         candidates.append((sheet_name, score))
 
@@ -174,129 +395,121 @@ def find_best_main_sheet(wb):
 # DATOS GENERALES
 # =========================================================
 def get_delegacion(ws):
-    for r in range(1, min(ws.max_row, 80) + 1):
-        for c in range(1, min(ws.max_column, 20) + 1):
-            val = get_effective_cell_value(ws, r, c)
-            if "delegación" in norm_text(val) or "delegacion" in norm_text(val):
-                derecha = get_right_value(ws, r, c, max_steps=8)
-                if is_meaningful(derecha):
-                    return clean_text(derecha)
+    """
+    Busca la delegación de forma robusta:
+    1. Etiqueta 'Delegación' en cualquier parte superior
+    2. También intenta detectar una fila de encabezado con delegación
+    """
+    max_row = min(ws.max_row, 80)
+    max_col = min(ws.max_column, 25)
 
-                abajo = get_down_value(ws, r, c, max_steps=3)
-                if is_meaningful(abajo):
-                    return clean_text(abajo)
+    best_candidate = ""
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            val = get_effective_cell_value(ws, r, c)
+            txt = normalize_text(val)
+
+            if "delegacion" in txt:
+                near = get_near_nonempty(ws, r, c)
+                if is_nonempty(near):
+                    cleaned = clean_text(near)
+                    if normalize_text(cleaned) != "delegacion":
+                        return cleaned
+
+    for r in range(1, max_row + 1):
+        row_vals = row_values(ws, r, max_col)
+        joined = normalize_text(" | ".join("" if v is None else str(v) for v in row_vals))
+        if "delegacion" in joined:
+            for v in row_vals:
+                vt = normalize_text(v)
+                if is_nonempty(v) and "delegacion" not in vt and len(vt) > 2:
+                    best_candidate = clean_text(v)
+                    break
+            if best_candidate:
+                return best_candidate
+
+    return ""
+
+
+def get_fecha_actualizacion(ws):
+    max_row = min(ws.max_row, 30)
+    max_col = min(ws.max_column, 25)
+
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            val = get_effective_cell_value(ws, r, c)
+            txt = normalize_text(val)
+
+            if "fecha de actualizacion" in txt:
+                near = get_near_nonempty(ws, r, c)
+                if is_nonempty(near):
+                    return clean_text(near)
+
     return ""
 
 
 # =========================================================
-# LÍNEA DE ACCIÓN
+# BÚSQUEDA ROBUSTA DE BLOQUES
 # =========================================================
 def looks_like_bad_line_value(text: str) -> bool:
-    t = norm_text(text)
-
-    bad_patterns = [
-        "problemática",
-        "problematica",
-        "problemática de linea",
-        "problematica de linea",
-        "líder",
-        "lider",
-        "delegación",
-        "delegacion",
-        "municipalidad",
-        "trimestre",
-        "indicador",
-        "meta",
-        "avance",
-        "descripción",
-        "descripcion",
-        "cantidad",
-        "observaciones",
-        "línea de acción",
-        "linea de accion",
-    ]
-    return any(p in t for p in bad_patterns)
+    t = normalize_text(text)
+    if not t:
+        return True
+    return any(p in t for p in BAD_LINE_TEXT)
 
 
 def extract_line_number_from_area(ws, start_row, start_col):
+    """
+    Intenta extraer el número o nombre de la línea:
+    - derecha
+    - misma fila
+    - área cercana
+    """
     candidates = []
 
-    for c in range(start_col + 1, min(ws.max_column, start_col + 8) + 1):
+    # misma fila a la derecha
+    for c in range(start_col, min(ws.max_column, start_col + 10) + 1):
         val = get_effective_cell_value(ws, start_row, c)
-        if is_meaningful(val):
+        if is_nonempty(val):
             txt = clean_text(val)
             if not looks_like_bad_line_value(txt):
                 candidates.append(txt)
 
+    # área cercana
     for r in range(start_row, min(ws.max_row, start_row + 3) + 1):
-        for c in range(start_col, min(ws.max_column, start_col + 6) + 1):
+        for c in range(max(1, start_col - 1), min(ws.max_column, start_col + 8) + 1):
             val = get_effective_cell_value(ws, r, c)
-            if is_meaningful(val):
+            if is_nonempty(val):
                 txt = clean_text(val)
                 if not looks_like_bad_line_value(txt):
                     candidates.append(txt)
 
-    if not candidates:
-        return ""
-
-    for x in candidates:
-        m = re.search(r"\d+([.\-]\d+)?", str(x))
+    # primero intenta capturar un número
+    for candidate in candidates:
+        m = re.search(r"(\d+(?:[.\-]\d+)?)", str(candidate))
         if m:
-            return m.group(0)
+            return m.group(1)
 
-    short_candidates = [x for x in candidates if len(str(x).strip()) <= 10]
+    # si no, devuelve texto corto
+    short_candidates = [x for x in candidates if len(str(x).strip()) <= 18]
     if short_candidates:
         return str(short_candidates[0]).strip()
 
-    return str(candidates[0]).strip()
-
-
-def search_value_near_keywords(ws, start_row, end_row, keywords):
-    for r in range(start_row, min(end_row, ws.max_row) + 1):
-        for c in range(1, ws.max_column + 1):
-            val = get_effective_cell_value(ws, r, c)
-            t = norm_text(val)
-            if any(k in t for k in keywords):
-                cerca = get_near_value(ws, r, c)
-                if is_meaningful(cerca):
-                    return clean_text(cerca)
     return ""
 
 
-def detect_trimester(ws, start_row, end_row):
-    for r in range(start_row, min(end_row, ws.max_row) + 1):
-        txt = norm_text(row_text(ws, r))
-
-        if "trimestre" in txt:
-            for c in range(1, ws.max_column + 1):
-                v = clean_text(get_effective_cell_value(ws, r, c))
-                if v in ["I", "II", "III", "IV"]:
-                    return v
-
-            if " iv" in f" {txt}" or "cuarto" in txt or "4" in txt:
-                return "IV"
-            if " iii" in f" {txt}" or "tercer" in txt or "3" in txt:
-                return "III"
-            if " ii" in f" {txt}" or "segundo" in txt or "2" in txt:
-                return "II"
-            if " i" in f" {txt}" or "primer" in txt or "1" in txt:
-                return "I"
-
-    return ""
-
-
-# =========================================================
-# BLOQUES
-# =========================================================
 def find_line_action_starts(ws):
     starts = []
+    mr = ws.max_row
+    mc = min(ws.max_column, 25)
 
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
+    for r in range(1, mr + 1):
+        for c in range(1, mc + 1):
             val = get_effective_cell_value(ws, r, c)
-            t = norm_text(val)
+            txt = normalize_text(val)
 
-            if "línea de acción" in t or "linea de accion" in t:
+            if any(k in txt for k in KEY_LINEA):
                 line_value = extract_line_number_from_area(ws, r, c)
                 starts.append({
                     "row": r,
@@ -305,17 +518,124 @@ def find_line_action_starts(ws):
                 })
                 break
 
+    # limpiar duplicados por filas muy cercanas
     cleaned = []
     last_row = -999
 
     for item in starts:
-        if item["row"] - last_row > 1:
+        if item["row"] - last_row > 2:
             cleaned.append(item)
             last_row = item["row"]
 
     return cleaned
 
 
+def search_value_near_keywords(ws, start_row, end_row, keywords, value_blacklist=None):
+    if value_blacklist is None:
+        value_blacklist = []
+
+    best_value = ""
+    best_score = -1
+
+    for r in range(start_row, min(end_row, ws.max_row) + 1):
+        for c in range(1, ws.max_column + 1):
+            val = get_effective_cell_value(ws, r, c)
+            txt = normalize_text(val)
+
+            local_score = sum(1 for kw in keywords if kw in txt)
+            if local_score > 0:
+                candidates = [
+                    get_right_nonempty(ws, r, c, 12),
+                    get_down_nonempty(ws, r, c, 5),
+                    get_left_nonempty(ws, r, c, 4),
+                    get_up_nonempty(ws, r, c, 2),
+                ]
+
+                for cand in candidates:
+                    cand_clean = clean_text(cand)
+                    cand_norm = normalize_text(cand_clean)
+
+                    if not cand_norm:
+                        continue
+                    if cand_norm == txt:
+                        continue
+                    if any(b in cand_norm for b in value_blacklist):
+                        continue
+
+                    # preferir textos con contenido real
+                    bonus = 0
+                    if len(cand_clean) > 2:
+                        bonus += 1
+                    if len(cand_clean) > 8:
+                        bonus += 1
+                    if cand_norm not in keywords:
+                        bonus += 1
+
+                    total_score = local_score + bonus
+                    if total_score > best_score:
+                        best_score = total_score
+                        best_value = cand_clean
+
+    return best_value
+
+
+def detect_trimester(ws, start_row, end_row):
+    """
+    Detecta trimestre:
+    - valor cercano a etiqueta trimestre
+    - texto de la fila
+    """
+    roman_map = {
+        "i": "I",
+        "ii": "II",
+        "iii": "III",
+        "iv": "IV",
+        "1": "I",
+        "2": "II",
+        "3": "III",
+        "4": "IV",
+        "primer": "I",
+        "segundo": "II",
+        "tercer": "III",
+        "cuarto": "IV",
+    }
+
+    for r in range(start_row, min(end_row, ws.max_row) + 1):
+        for c in range(1, ws.max_column + 1):
+            val = get_effective_cell_value(ws, r, c)
+            txt = normalize_text(val)
+
+            if "trimestre" in txt:
+                # buscar cerca
+                candidates = [
+                    get_right_nonempty(ws, r, c, 5),
+                    get_down_nonempty(ws, r, c, 2),
+                    get_left_nonempty(ws, r, c, 2),
+                ]
+
+                for cand in candidates:
+                    ct = normalize_text(cand)
+                    for k, out in roman_map.items():
+                        if re.fullmatch(rf"{re.escape(k)}", ct) or f"{k} trimestre" in ct:
+                            return out
+
+                # buscar en toda la fila
+                row_txt = normalize_text(row_text(ws, r))
+                if "iv trimestre" in row_txt or "4 trimestre" in row_txt or "cuarto trimestre" in row_txt:
+                    return "IV"
+                if "iii trimestre" in row_txt or "3 trimestre" in row_txt or "tercer trimestre" in row_txt:
+                    return "III"
+                if "ii trimestre" in row_txt or "2 trimestre" in row_txt or "segundo trimestre" in row_txt:
+                    return "II"
+                if "i trimestre" in row_txt or "1 trimestre" in row_txt or "primer trimestre" in row_txt:
+                    return "I"
+
+    return ""
+
+
+# =========================================================
+# DETECCIÓN DE TABLA
+# =========================================================
 def detect_header_row(ws, start_row, end_row):
     best_row = None
     best_score = -1
@@ -333,27 +653,33 @@ def detect_header_row(ws, start_row, end_row):
         }
 
         for v in vals:
-            t = norm_text(v)
+            t = normalize_text(v)
 
-            if "indicador" in t:
+            if any(k in t for k in KEY_HEADER_INDICADOR):
                 found["indicador"] = True
-            if "meta" in t:
+            if any(k in t for k in KEY_HEADER_META):
                 found["meta"] = True
-            if "avance" in t:
+            if any(k in t for k in KEY_HEADER_AVANCE):
                 found["avance"] = True
-            if "descripcion" in t or "descripción" in t:
+            if any(k in t for k in KEY_HEADER_DESCRIPCION):
                 found["descripcion"] = True
-            if "cantidad" in t:
+            if any(k in t for k in KEY_HEADER_CANTIDAD):
                 found["cantidad"] = True
-            if "observ" in t:
+            if any(k in t for k in KEY_HEADER_OBSERVACIONES):
                 found["observaciones"] = True
 
         score = sum(found.values())
 
+        # favorece filas que sí parecen encabezados de tabla completa
         if found["indicador"] and found["meta"] and found["avance"] and found["descripcion"]:
-            if score > best_score:
-                best_score = score
-                best_row = r
+            score += 4
+
+        if score > best_score:
+            best_score = score
+            best_row = r
+
+    if best_score < 3:
+        return None
 
     return best_row
 
@@ -363,36 +689,50 @@ def map_headers(ws, header_row):
 
     for c in range(1, ws.max_column + 1):
         val = get_effective_cell_value(ws, header_row, c)
-        t = norm_text(val)
+        t = normalize_text(val)
 
-        if "indicador" in t and "Indicador" not in header_map:
+        if any(k in t for k in KEY_HEADER_INDICADOR) and "Indicador" not in header_map:
             header_map["Indicador"] = c
 
-        elif "meta" in t and "Meta (editable)" not in header_map:
+        elif any(k in t for k in KEY_HEADER_META) and "Meta (editable)" not in header_map:
             header_map["Meta (editable)"] = c
 
-        elif "avance" in t and "Avance" not in header_map:
-            header_map["Avance"] = c
+        elif any(k in t for k in KEY_HEADER_AVANCE) and "Avance (Editable)" not in header_map:
+            header_map["Avance (Editable)"] = c
 
-        elif ("descripcion" in t or "descripción" in t) and "Descripción" not in header_map:
-            header_map["Descripción"] = c
+        elif any(k in t for k in KEY_HEADER_DESCRIPCION) and "Descripción (editable)" not in header_map:
+            header_map["Descripción (editable)"] = c
 
-        elif "cantidad" in t and "Cantidad" not in header_map:
-            header_map["Cantidad"] = c
+        elif any(k in t for k in KEY_HEADER_CANTIDAD) and "Cantidad (editable)" not in header_map:
+            header_map["Cantidad (editable)"] = c
 
-        elif "observ" in t and "Observaciones (Editable)" not in header_map:
+        elif any(k in t for k in KEY_HEADER_OBSERVACIONES) and "Observaciones (Editable)" not in header_map:
             header_map["Observaciones (Editable)"] = c
 
     return header_map
+
+
+def normalize_status_value(value):
+    t = normalize_text(value)
+    if not t:
+        return ""
+
+    if "completo" in t:
+        return "Completado"
+    if "con actividades" in t:
+        return "Con Actividades"
+    if "sin actividades" in t:
+        return "Sin Actividades"
+    return clean_text(value)
 
 
 def extract_table(ws, header_row, block_end_row):
     columns = [
         "Indicador",
         "Meta (editable)",
-        "Avance",
-        "Descripción",
-        "Cantidad",
+        "Avance (Editable)",
+        "Descripción (editable)",
+        "Cantidad (editable)",
         "Observaciones (Editable)"
     ]
 
@@ -402,9 +742,9 @@ def extract_table(ws, header_row, block_end_row):
         return pd.DataFrame([{
             "Indicador": "",
             "Meta (editable)": "",
-            "Avance": "",
-            "Descripción": "",
-            "Cantidad": "",
+            "Avance (Editable)": "",
+            "Descripción (editable)": "",
+            "Cantidad (editable)": "",
             "Observaciones (Editable)": ""
         }])
 
@@ -416,24 +756,28 @@ def extract_table(ws, header_row, block_end_row):
 
         indicador = get_effective_cell_value(ws, r, header_map.get("Indicador")) if header_map.get("Indicador") else ""
         meta = get_effective_cell_value(ws, r, header_map.get("Meta (editable)")) if header_map.get("Meta (editable)") else ""
-        avance = get_effective_cell_value(ws, r, header_map.get("Avance")) if header_map.get("Avance") else ""
-        descripcion = get_effective_cell_value(ws, r, header_map.get("Descripción")) if header_map.get("Descripción") else ""
-        cantidad = get_effective_cell_value(ws, r, header_map.get("Cantidad")) if header_map.get("Cantidad") else ""
+        avance = get_effective_cell_value(ws, r, header_map.get("Avance (Editable)")) if header_map.get("Avance (Editable)") else ""
+        descripcion = get_effective_cell_value(ws, r, header_map.get("Descripción (editable)")) if header_map.get("Descripción (editable)") else ""
+        cantidad = get_effective_cell_value(ws, r, header_map.get("Cantidad (editable)")) if header_map.get("Cantidad (editable)") else ""
         observaciones = get_effective_cell_value(ws, r, header_map.get("Observaciones (Editable)")) if header_map.get("Observaciones (Editable)") else ""
 
         row_data["Indicador"] = "" if indicador is None else indicador
         row_data["Meta (editable)"] = "" if meta is None else meta
-        row_data["Avance"] = "" if avance is None else avance
-        row_data["Descripción"] = "" if descripcion is None else descripcion
-        row_data["Cantidad"] = "" if cantidad is None else cantidad
+        row_data["Avance (Editable)"] = "" if avance is None else normalize_status_value(avance)
+        row_data["Descripción (editable)"] = "" if descripcion is None else descripcion
+        row_data["Cantidad (editable)"] = "" if cantidad is None else cantidad
         row_data["Observaciones (Editable)"] = "" if observaciones is None else observaciones
 
         has_content = any(str(v).strip() != "" for v in row_data.values())
 
         if not has_content:
             empty_count += 1
-            if empty_count >= 4:
+            if empty_count >= 5:
                 break
+            continue
+
+        # evita repetir una fila que sea claramente un encabezado
+        if normalize_text(row_data["Indicador"]) in ["indicador", "indicadores"]:
             continue
 
         empty_count = 0
@@ -443,82 +787,101 @@ def extract_table(ws, header_row, block_end_row):
         return pd.DataFrame([{
             "Indicador": "",
             "Meta (editable)": "",
-            "Avance": "",
-            "Descripción": "",
-            "Cantidad": "",
+            "Avance (Editable)": "",
+            "Descripción (editable)": "",
+            "Cantidad (editable)": "",
             "Observaciones (Editable)": ""
         }])
 
     return pd.DataFrame(data, columns=columns)
 
 
+# =========================================================
+# EXTRACCIÓN COMPLETA DE BLOQUES
+# =========================================================
 def extract_blocks_from_sheet(ws):
     starts = find_line_action_starts(ws)
     delegacion = get_delegacion(ws)
+    fecha_actualizacion = get_fecha_actualizacion(ws)
+
     blocks = []
 
     if not starts:
-        return blocks
+        return {
+            "delegacion": delegacion,
+            "fecha_actualizacion": fecha_actualizacion,
+            "blocks": []
+        }
 
     for i, start in enumerate(starts):
         start_row = start["row"]
         end_row = starts[i + 1]["row"] - 1 if i + 1 < len(starts) else ws.max_row
 
         linea_numero = start["line_value"]
+        if not linea_numero:
+            linea_numero = str(i + 1)
 
         problematica = search_value_near_keywords(
-            ws,
-            start_row,
-            min(start_row + 12, end_row),
-            ["problemática", "problematica"]
+            ws=ws,
+            start_row=start_row,
+            end_row=min(start_row + 12, end_row),
+            keywords=KEY_PROBLEMATICA,
+            value_blacklist=["problematica", "lider", "trimestre", "indicador", "meta"]
         )
 
         lider = search_value_near_keywords(
-            ws,
-            start_row,
-            min(start_row + 12, end_row),
-            ["líder estratégico", "lider estrategico", "líder", "lider"]
+            ws=ws,
+            start_row=start_row,
+            end_row=min(start_row + 12, end_row),
+            keywords=KEY_LIDER,
+            value_blacklist=["lider", "trimestre", "indicador", "meta", "problematica"]
         )
 
         trimestre = detect_trimester(
-            ws,
-            start_row,
-            min(start_row + 12, end_row)
+            ws=ws,
+            start_row=start_row,
+            end_row=min(start_row + 12, end_row)
         )
 
         header_row = detect_header_row(
-            ws,
-            start_row,
-            min(start_row + 30, end_row)
+            ws=ws,
+            start_row=start_row,
+            end_row=min(start_row + 35, end_row)
         )
 
         tabla = extract_table(ws, header_row, end_row) if header_row else pd.DataFrame([{
             "Indicador": "",
             "Meta (editable)": "",
-            "Avance": "",
-            "Descripción": "",
-            "Cantidad": "",
+            "Avance (Editable)": "",
+            "Descripción (editable)": "",
+            "Cantidad (editable)": "",
             "Observaciones (Editable)": ""
         }])
 
         blocks.append({
             "delegacion": delegacion,
-            "linea_accion": linea_numero if linea_numero else str(i + 1),
-            "problematica": problematica,
-            "lider": lider,
-            "trimestre": trimestre,
+            "fecha_actualizacion": fecha_actualizacion,
+            "linea_accion": str(linea_numero).strip(),
+            "problematica": clean_text(problematica),
+            "lider": clean_text(lider),
+            "trimestre": clean_text(trimestre),
             "tabla": tabla,
             "rango_inicio": start_row,
-            "rango_fin": end_row
+            "rango_fin": end_row,
+            "header_row": header_row
         })
 
-    return blocks
+    return {
+        "delegacion": delegacion,
+        "fecha_actualizacion": fecha_actualizacion,
+        "blocks": blocks
+    }
 
 
 # =========================================================
 # PDF
 # =========================================================
-def build_pdf_all_lines(data_lineas, delegacion_general):
+def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion=""):
     buffer = BytesIO()
 
     doc = SimpleDocTemplate(
@@ -526,7 +889,7 @@ def build_pdf_all_lines(data_lineas, delegacion_general):
         pagesize=letter,
         rightMargin=25,
         leftMargin=25,
-        topMargin=30,
+        topMargin=28,
         bottomMargin=25
     )
 
@@ -552,13 +915,18 @@ def build_pdf_all_lines(data_lineas, delegacion_general):
     small_style = ParagraphStyle(
         "small_custom",
         parent=styles["Normal"],
-        fontSize=7.5,
+        fontSize=7.4,
         leading=9
     )
 
     elements = []
+
     elements.append(Paragraph("REPORTE TRIMESTRAL DE LÍNEAS DE ACCIÓN", title_style))
     elements.append(Paragraph(f"<b>Delegación:</b> {safe_str(delegacion_general)}", normal_style))
+
+    if safe_str(fecha_actualizacion):
+        elements.append(Paragraph(f"<b>Fecha de actualización:</b> {safe_str(fecha_actualizacion)}", normal_style))
+
     elements.append(Spacer(1, 8))
 
     ordered_keys = list(data_lineas.keys())
@@ -589,30 +957,30 @@ def build_pdf_all_lines(data_lineas, delegacion_general):
             table_data.append([
                 Paragraph(safe_str(row.get("Indicador", "")), small_style),
                 Paragraph(safe_str(row.get("Meta (editable)", "")), small_style),
-                Paragraph(safe_str(row.get("Avance", "")), small_style),
-                Paragraph(safe_str(row.get("Descripción", "")), small_style),
-                Paragraph(safe_str(row.get("Cantidad", "")), small_style),
+                Paragraph(safe_str(row.get("Avance (Editable)", "")), small_style),
+                Paragraph(safe_str(row.get("Descripción (editable)", "")), small_style),
+                Paragraph(safe_str(row.get("Cantidad (editable)", "")), small_style),
                 Paragraph(safe_str(row.get("Observaciones (Editable)", "")), small_style),
             ])
 
         table = Table(
             table_data,
             repeatRows=1,
-            colWidths=[120, 80, 55, 90, 55, 120]
+            colWidths=[112, 76, 70, 95, 65, 120]
         )
 
         table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E2F3")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+            ("FONTSIZE", (0, 0), (-1, -1), 7.2),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ("LEFTPADDING", (0, 0), (-1, -1), 4),
             ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ("TOPPADDING", (0, 0), (-1, -1), 4),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8F8F8")]),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
         ]))
 
         elements.append(table)
@@ -625,46 +993,52 @@ def build_pdf_all_lines(data_lineas, delegacion_general):
 
 
 # =========================================================
-# ESTILOS
+# RESUMEN
 # =========================================================
-st.markdown("""
-<style>
-.block-container {
-    max-width: 1500px;
-    padding-top: 1rem;
-    padding-bottom: 2rem;
-}
+def build_summary_dataframe(data_lineas):
+    rows = []
 
-.form-box {
-    border: 1px solid #444;
-    padding: 18px;
-    margin-top: 10px;
-    margin-bottom: 16px;
-    border-radius: 10px;
-}
+    for _, item in data_lineas.items():
+        df = item["tabla"].copy()
+        total_indicadores = len(df)
 
-.line-card {
-    border: 1px solid #333;
-    border-radius: 10px;
-    padding: 16px;
-    margin-bottom: 18px;
-}
+        counts = {
+            "Completado": 0,
+            "Con Actividades": 0,
+            "Sin Actividades": 0
+        }
 
-.small-note {
-    font-size: 0.92rem;
-    opacity: 0.9;
-}
-</style>
-""", unsafe_allow_html=True)
+        if "Avance (Editable)" in df.columns:
+            for value in df["Avance (Editable)"].fillna("").astype(str):
+                norm = normalize_status_value(value)
+                if norm in counts:
+                    counts[norm] += 1
+
+        rows.append({
+            "Línea": item.get("display_linea", ""),
+            "Problemática": item["info"].get("problematica", ""),
+            "Líder Estratégico": item["info"].get("lider", ""),
+            "Trimestre": item.get("trimestre", ""),
+            "Indicadores": total_indicadores,
+            "Completado": counts["Completado"],
+            "Con Actividades": counts["Con Actividades"],
+            "Sin Actividades": counts["Sin Actividades"],
+        })
+
+    return pd.DataFrame(rows)
 
 
 # =========================================================
 # INTERFAZ
 # =========================================================
-st.title("Seguimiento de líneas de acción")
+st.markdown('<div class="main-title">Seguimiento de líneas de acción</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="sub-note">Sube un archivo Excel (.xlsm o .xlsx). La app localizará de forma robusta la delegación, línea de acción, problemática, líder estratégico, trimestre y el detalle editable de indicadores.</div>',
+    unsafe_allow_html=True
+)
 
 uploaded_file = st.file_uploader(
-    "Arrastra y suelta el archivo .xlsm o .xlsx",
+    "Arrastra y suelta el archivo Excel",
     type=["xlsm", "xlsx"]
 )
 
@@ -674,38 +1048,88 @@ if uploaded_file is not None:
             st.session_state["archivo_nombre"] = uploaded_file.name
             st.session_state["lineas_guardadas"] = {}
             st.session_state["pdf_final"] = None
+            st.session_state["ultimo_resumen"] = pd.DataFrame()
+
+        file_bytes = uploaded_file.read()
 
         wb = load_workbook(
-            BytesIO(uploaded_file.read()),
+            BytesIO(file_bytes),
             data_only=False,
             keep_vba=True
         )
 
         main_sheet = find_best_main_sheet(wb)
         ws = wb[main_sheet]
-        blocks = extract_blocks_from_sheet(ws)
-        delegacion = get_delegacion(ws)
+
+        extraction = extract_blocks_from_sheet(ws)
+
+        delegacion = extraction["delegacion"]
+        fecha_actualizacion = extraction["fecha_actualizacion"]
+        blocks = extraction["blocks"]
 
         if not blocks:
-            st.warning("No se encontraron líneas de acción en la hoja.")
+            st.warning("No se encontraron bloques de líneas de acción en la hoja cargada.")
             st.stop()
 
-        st.success(f"Hoja detectada: {main_sheet}")
-        st.info(f"Líneas detectadas: {len(blocks)}")
+        # =========================================
+        # RESUMEN SUPERIOR
+        # =========================================
+        col_k1, col_k2, col_k3, col_k4 = st.columns(4)
 
-        st.markdown('<div class="form-box">', unsafe_allow_html=True)
-        c1, c2 = st.columns([1.2, 5])
-        with c1:
-            st.markdown("### Delegación :")
-        with c2:
+        with col_k1:
+            st.markdown('<div class="kpi-box"><b>Hoja detectada</b><br>' + safe_str(main_sheet) + '</div>', unsafe_allow_html=True)
+        with col_k2:
+            st.markdown('<div class="kpi-box"><b>Líneas detectadas</b><br>' + str(len(blocks)) + '</div>', unsafe_allow_html=True)
+        with col_k3:
+            st.markdown('<div class="kpi-box"><b>Delegación</b><br>' + (safe_str(delegacion) or "-") + '</div>', unsafe_allow_html=True)
+        with col_k4:
+            st.markdown('<div class="kpi-box"><b>Fecha actualización</b><br>' + (safe_str(fecha_actualizacion) or "-") + '</div>', unsafe_allow_html=True)
+
+        st.markdown("")
+
+        st.markdown('<div class="info-card">', unsafe_allow_html=True)
+        g1, g2 = st.columns([1.2, 4])
+
+        with g1:
+            st.markdown("**Delegación**")
             st.text_input(
                 "Delegación",
                 value=delegacion,
                 disabled=True,
                 label_visibility="collapsed"
             )
+
+        with g2:
+            st.markdown("**Fecha de actualización**")
+            st.text_input(
+                "Fecha de actualización",
+                value=fecha_actualizacion,
+                disabled=True,
+                label_visibility="collapsed"
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # =========================================
+        # SIDEBAR
+        # =========================================
+        with st.sidebar:
+            st.header("Resumen")
+            st.write(f"**Archivo:** {uploaded_file.name}")
+            st.write(f"**Hoja detectada:** {main_sheet}")
+            st.write(f"**Delegación:** {delegacion or '-'}")
+            st.write(f"**Fecha de actualización:** {fecha_actualizacion or '-'}")
+            st.write(f"**Líneas encontradas:** {len(blocks)}")
+            st.divider()
+
+            lineas_detectadas = [f"Línea {b['linea_accion']}" for b in blocks]
+            st.write("**Líneas detectadas:**")
+            for item in lineas_detectadas:
+                st.write(f"• {item}")
+
+        # =========================================
+        # BLOQUES
+        # =========================================
         for idx, bloque in enumerate(blocks):
             linea_id = str(bloque["linea_accion"]).strip() if bloque["linea_accion"] else str(idx + 1)
 
@@ -720,69 +1144,79 @@ if uploaded_file is not None:
                 trim_base = bloque["trimestre"] if bloque["trimestre"] in ["", "I", "II", "III", "IV"] else ""
 
             st.markdown('<div class="line-card">', unsafe_allow_html=True)
-            st.subheader(f"Línea {linea_id}")
 
-            c1, c2, c3, c4, c5, c6 = st.columns([1.8, 1.2, 1.6, 3.4, 1.8, 2.0])
+            st.markdown(f'<div class="section-title">Línea {safe_str(linea_id)}</div>', unsafe_allow_html=True)
+            st.markdown('<hr class="soft-line">', unsafe_allow_html=True)
+
+            c1, c2, c3 = st.columns([1.2, 3.8, 2])
 
             with c1:
-                st.markdown("### línea de acción #:")
-            with c2:
                 st.text_input(
-                    f"Línea de acción {block_key}",
+                    f"Línea {block_key}",
                     value=linea_id,
                     disabled=True,
-                    label_visibility="collapsed",
-                    key=f"linea_{block_key}"
+                    label="Línea de acción #"
                 )
 
-            with c3:
-                st.markdown("### Problemática:")
-            with c4:
+            with c2:
                 st.text_input(
                     f"Problemática {block_key}",
                     value=bloque["problematica"],
                     disabled=True,
-                    label_visibility="collapsed",
-                    key=f"problematica_{block_key}"
+                    label="Problemática"
                 )
 
-            with c5:
-                st.markdown("### Líder Estratégico:")
-            with c6:
+            with c3:
                 st.text_input(
                     f"Líder {block_key}",
                     value=bloque["lider"],
                     disabled=True,
-                    label_visibility="collapsed",
-                    key=f"lider_{block_key}"
+                    label="Líder Estratégico"
                 )
 
-            c7, c8, c9 = st.columns([1.4, 1.2, 4])
-            with c7:
-                st.markdown("### Trimestre:")
-            with c8:
+            c4, c5 = st.columns([1.2, 5])
+
+            with c4:
                 trim_options = ["", "I", "II", "III", "IV"]
                 selected_trim = st.selectbox(
                     f"Trimestre {block_key}",
                     trim_options,
                     index=trim_options.index(trim_base if trim_base in trim_options else ""),
-                    label_visibility="collapsed",
+                    label="Trimestre",
                     key=f"trim_{block_key}"
                 )
 
-            st.markdown("#### Detalle")
+            with c5:
+                st.caption(
+                    f"Filas detectadas del bloque: {bloque['rango_inicio']} a {bloque['rango_fin']} | "
+                    f"Encabezado detectado: {bloque['header_row'] if bloque['header_row'] else '-'}"
+                )
+
+            st.markdown("#### Detalle editable")
 
             df_editado = st.data_editor(
                 df_base,
                 use_container_width=True,
                 hide_index=True,
                 num_rows="dynamic",
-                key=f"tabla_{block_key}"
+                key=f"tabla_{block_key}",
+                column_config={
+                    "Indicador": st.column_config.TextColumn("Indicador", width="medium"),
+                    "Meta (editable)": st.column_config.TextColumn("Meta (editable)", width="medium"),
+                    "Avance (Editable)": st.column_config.SelectboxColumn(
+                        "Avance (Editable)",
+                        options=["", "Completado", "Con Actividades", "Sin Actividades"],
+                        width="small"
+                    ),
+                    "Descripción (editable)": st.column_config.TextColumn("Descripción (editable)", width="large"),
+                    "Cantidad (editable)": st.column_config.TextColumn("Cantidad (editable)", width="small"),
+                    "Observaciones (Editable)": st.column_config.TextColumn("Observaciones (Editable)", width="large"),
+                }
             )
 
-            c_btn1, c_btn2 = st.columns([2.2, 5])
+            btn1, btn2, btn3 = st.columns([2.3, 2.4, 5])
 
-            with c_btn1:
+            with btn1:
                 if st.button(f"Guardar / Actualizar línea {linea_id}", key=f"guardar_{block_key}"):
                     st.session_state["lineas_guardadas"][save_key] = {
                         "display_linea": linea_id,
@@ -798,33 +1232,106 @@ if uploaded_file is not None:
                         "trimestre": selected_trim
                     }
                     st.session_state["pdf_final"] = None
-                    st.success(f"Línea {linea_id} guardada correctamente")
+                    st.success(f"Línea {linea_id} guardada correctamente.")
+
+            with btn2:
+                if st.button(f"Restaurar línea {linea_id}", key=f"restaurar_{block_key}"):
+                    if save_key in st.session_state["lineas_guardadas"]:
+                        del st.session_state["lineas_guardadas"][save_key]
+                    st.session_state["pdf_final"] = None
+                    st.warning(f"Línea {linea_id} restaurada a los datos detectados del Excel.")
+                    st.rerun()
 
             st.markdown("</div>", unsafe_allow_html=True)
 
+        # =========================================
+        # GUARDADO MASIVO
+        # =========================================
+        st.markdown("## Gestión general")
+
+        gbtn1, gbtn2 = st.columns([2.5, 5])
+
+        with gbtn1:
+            if st.button("Guardar todas las líneas detectadas"):
+                for idx, bloque in enumerate(blocks):
+                    linea_id = str(bloque["linea_accion"]).strip() if bloque["linea_accion"] else str(idx + 1)
+                    block_key = f"bloque_{idx}_{linea_id}"
+                    save_key = f"{idx}_{linea_id}"
+
+                    trim_value = st.session_state.get(f"trim_{block_key}", bloque["trimestre"])
+                    tabla_value = st.session_state.get(f"tabla_{block_key}", bloque["tabla"])
+
+                    if isinstance(tabla_value, pd.DataFrame):
+                        tabla_guardar = tabla_value.copy()
+                    else:
+                        tabla_guardar = bloque["tabla"].copy()
+
+                    st.session_state["lineas_guardadas"][save_key] = {
+                        "display_linea": linea_id,
+                        "info": {
+                            "delegacion": delegacion,
+                            "linea_accion": linea_id,
+                            "problematica": bloque["problematica"],
+                            "lider": bloque["lider"],
+                            "rango_inicio": bloque["rango_inicio"],
+                            "rango_fin": bloque["rango_fin"],
+                        },
+                        "tabla": tabla_guardar,
+                        "trimestre": trim_value if trim_value in ["", "I", "II", "III", "IV"] else ""
+                    }
+
+                st.session_state["pdf_final"] = None
+                st.success("Todas las líneas fueron guardadas correctamente.")
+
+        with gbtn2:
+            st.caption("Usa esta opción si deseas guardar de una sola vez todo lo detectado y editado en pantalla.")
+
+        # =========================================
+        # LÍNEAS GUARDADAS
+        # =========================================
         st.markdown("## Líneas guardadas")
+
         if st.session_state["lineas_guardadas"]:
             cols_saved = st.columns(4)
             ordered_items = list(st.session_state["lineas_guardadas"].items())
 
             for i, (_, item) in enumerate(ordered_items):
                 with cols_saved[i % 4]:
-                    st.write(f"✔ Línea {item.get('display_linea', '')}")
+                    st.success(f"Línea {item.get('display_linea', '')}")
         else:
             st.info("Todavía no has guardado ninguna línea.")
 
+        # =========================================
+        # RESUMEN TABULAR
+        # =========================================
+        st.markdown("## Resumen consolidado")
+
+        if st.session_state["lineas_guardadas"]:
+            df_summary = build_summary_dataframe(st.session_state["lineas_guardadas"])
+            st.session_state["ultimo_resumen"] = df_summary.copy()
+            st.dataframe(df_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("Cuando guardes líneas, aquí verás el resumen consolidado.")
+
+        # =========================================
+        # PDF
+        # =========================================
         st.markdown("## Reporte final")
 
-        if st.button("Preparar PDF con todas las líneas guardadas"):
-            if not st.session_state["lineas_guardadas"]:
-                st.warning("Primero debes guardar al menos una línea.")
-            else:
-                pdf_bytes = build_pdf_all_lines(
-                    st.session_state["lineas_guardadas"],
-                    delegacion_general=delegacion
-                )
-                st.session_state["pdf_final"] = pdf_bytes
-                st.success("PDF generado correctamente.")
+        p1, p2 = st.columns([2.5, 5])
+
+        with p1:
+            if st.button("Preparar PDF con todas las líneas guardadas"):
+                if not st.session_state["lineas_guardadas"]:
+                    st.warning("Primero debes guardar al menos una línea.")
+                else:
+                    pdf_bytes = build_pdf_all_lines(
+                        st.session_state["lineas_guardadas"],
+                        delegacion_general=delegacion,
+                        fecha_actualizacion=fecha_actualizacion
+                    )
+                    st.session_state["pdf_final"] = pdf_bytes
+                    st.success("PDF generado correctamente.")
 
         if st.session_state["pdf_final"]:
             st.download_button(
@@ -834,7 +1341,10 @@ if uploaded_file is not None:
                 mime="application/pdf"
             )
 
-        with st.expander("Resumen técnico"):
+        # =========================================
+        # TÉCNICO
+        # =========================================
+        with st.expander("Resumen técnico de detección"):
             debug_rows = []
             for b in blocks:
                 debug_rows.append({
@@ -845,7 +1355,9 @@ if uploaded_file is not None:
                     "Filas detalle": len(b["tabla"]),
                     "Fila inicio": b["rango_inicio"],
                     "Fila fin": b["rango_fin"],
+                    "Fila encabezado": b["header_row"],
                 })
+
             st.dataframe(pd.DataFrame(debug_rows), use_container_width=True, hide_index=True)
 
     except Exception as e:
