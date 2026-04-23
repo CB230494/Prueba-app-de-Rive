@@ -55,6 +55,9 @@ if "excel_final" not in st.session_state:
 if "ultimo_resumen" not in st.session_state:
     st.session_state["ultimo_resumen"] = pd.DataFrame()
 
+if "fecha_actualizacion_editable" not in st.session_state:
+    st.session_state["fecha_actualizacion_editable"] = ""
+
 # =========================================================
 # ESTILOS CSS
 # =========================================================
@@ -223,6 +226,7 @@ KEY_HEADER_META = ["meta"]
 KEY_HEADER_AVANCE = ["avance"]
 KEY_HEADER_DESCRIPCION = ["descripcion", "descripcio"]
 KEY_HEADER_CANTIDAD = ["cantidad"]
+KEY_HEADER_EVIDENCIA = ["evidencia", "evidencias"]
 KEY_HEADER_OBSERVACIONES = ["observaciones", "observacion", "obs"]
 
 BAD_LINE_TEXT = [
@@ -236,8 +240,11 @@ BAD_LINE_TEXT = [
     "descripcion",
     "cantidad",
     "observacion",
+    "evidencia",
     "linea de accion",
 ]
+
+TRIMESTRES_ORDEN = ["I", "II", "III", "IV"]
 
 # =========================================================
 # UTILIDADES DE EXCEL
@@ -317,7 +324,7 @@ def get_near_nonempty(ws, row, col):
     return ""
 
 
-def sheet_density_score(ws, max_row=220, max_col=40):
+def sheet_density_score(ws, max_row=220, max_col=60):
     score = 0
     mr = min(ws.max_row, max_row)
     mc = min(ws.max_column, max_col)
@@ -332,6 +339,7 @@ def sheet_density_score(ws, max_row=220, max_col=40):
         score += 4 if "avance" in txt else 0
         score += 4 if "descripcion" in txt else 0
         score += 4 if "cantidad" in txt else 0
+        score += 4 if "evidencia" in txt else 0
         score += 4 if "observaciones" in txt else 0
         score += 3 if "delegacion" in txt else 0
         score += 2 if "trimestre" in txt else 0
@@ -526,55 +534,8 @@ def search_value_near_keywords_multiline(ws, start_row, end_row, keywords, value
     return ""
 
 
-def detect_trimester(ws, start_row, end_row):
-    roman_map = {
-        "i": "I",
-        "ii": "II",
-        "iii": "III",
-        "iv": "IV",
-        "1": "I",
-        "2": "II",
-        "3": "III",
-        "4": "IV",
-        "primer": "I",
-        "segundo": "II",
-        "tercer": "III",
-        "cuarto": "IV",
-    }
-
-    for r in range(start_row, min(end_row, ws.max_row) + 1):
-        for c in range(1, ws.max_column + 1):
-            val = get_effective_cell_value(ws, r, c)
-            txt = normalize_text(val)
-
-            if "trimestre" in txt:
-                candidates = [
-                    get_right_nonempty(ws, r, c, 5),
-                    get_down_nonempty(ws, r, c, 2),
-                    get_left_nonempty(ws, r, c, 2),
-                ]
-
-                for cand in candidates:
-                    ct = normalize_text(cand)
-                    for k, out in roman_map.items():
-                        if re.fullmatch(rf"{re.escape(k)}", ct) or f"{k} trimestre" in ct:
-                            return out
-
-                row_txt = normalize_text(row_text(ws, r))
-                if "iv trimestre" in row_txt or "4 trimestre" in row_txt or "cuarto trimestre" in row_txt:
-                    return "IV"
-                if "iii trimestre" in row_txt or "3 trimestre" in row_txt or "tercer trimestre" in row_txt:
-                    return "III"
-                if "ii trimestre" in row_txt or "2 trimestre" in row_txt or "segundo trimestre" in row_txt:
-                    return "II"
-                if "i trimestre" in row_txt or "1 trimestre" in row_txt or "primer trimestre" in row_txt:
-                    return "I"
-
-    return ""
-
-
 # =========================================================
-# TABLA
+# TABLA / TRIMESTRES
 # =========================================================
 def detect_header_row(ws, start_row, end_row):
     best_row = None
@@ -589,7 +550,7 @@ def detect_header_row(ws, start_row, end_row):
             "avance": False,
             "descripcion": False,
             "cantidad": False,
-            "observaciones": False,
+            "evidencia": False,
         }
 
         for v in vals:
@@ -605,50 +566,105 @@ def detect_header_row(ws, start_row, end_row):
                 found["descripcion"] = True
             if any(k in t for k in KEY_HEADER_CANTIDAD):
                 found["cantidad"] = True
-            if any(k in t for k in KEY_HEADER_OBSERVACIONES):
-                found["observaciones"] = True
+            if any(k in t for k in KEY_HEADER_EVIDENCIA):
+                found["evidencia"] = True
 
         score = sum(found.values())
 
         if found["indicador"] and found["meta"] and found["avance"] and found["descripcion"]:
             score += 4
 
+        if found["cantidad"] and found["evidencia"]:
+            score += 2
+
         if score > best_score:
             best_score = score
             best_row = r
 
-    if best_score < 3:
+    if best_score < 4:
         return None
 
     return best_row
 
 
-def map_headers(ws, header_row):
-    header_map = {}
+def find_base_columns(ws, header_row):
+    base_cols = {
+        "Indicador": None,
+        "Meta": None,
+    }
 
     for c in range(1, ws.max_column + 1):
-        val = get_effective_cell_value(ws, header_row, c)
-        t = normalize_text(val)
+        t = normalize_text(get_effective_cell_value(ws, header_row, c))
 
-        if any(k in t for k in KEY_HEADER_INDICADOR) and "Indicador" not in header_map:
-            header_map["Indicador"] = c
+        if base_cols["Indicador"] is None and any(k in t for k in KEY_HEADER_INDICADOR):
+            base_cols["Indicador"] = c
+            continue
 
-        elif any(k in t for k in KEY_HEADER_META) and "Meta (editable)" not in header_map:
-            header_map["Meta (editable)"] = c
+        if base_cols["Meta"] is None and any(k in t for k in KEY_HEADER_META):
+            base_cols["Meta"] = c
+            continue
 
-        elif any(k in t for k in KEY_HEADER_AVANCE) and "Avance (Editable)" not in header_map:
-            header_map["Avance (Editable)"] = c
+    return base_cols
 
-        elif any(k in t for k in KEY_HEADER_DESCRIPCION) and "Descripción (editable)" not in header_map:
-            header_map["Descripción (editable)"] = c
 
-        elif any(k in t for k in KEY_HEADER_CANTIDAD) and "Cantidad (editable)" not in header_map:
-            header_map["Cantidad (editable)"] = c
+def normalize_trimester_label(value):
+    t = normalize_text(value)
 
-        elif any(k in t for k in KEY_HEADER_OBSERVACIONES) and "Observaciones (Editable)" not in header_map:
-            header_map["Observaciones (Editable)"] = c
+    if not t:
+        return ""
 
-    return header_map
+    if "iv trimestre" in t or "4 trimestre" in t or "cuarto trimestre" in t:
+        return "IV"
+    if "iii trimestre" in t or "3 trimestre" in t or "tercer trimestre" in t:
+        return "III"
+    if "ii trimestre" in t or "2 trimestre" in t or "segundo trimestre" in t:
+        return "II"
+    if "i trimestre" in t or "1 trimestre" in t or "primer trimestre" in t:
+        return "I"
+
+    return ""
+
+
+def detect_trimester_groups(ws, header_row, start_row, end_row):
+    groups = {}
+    scan_from = max(1, header_row - 3)
+    scan_to = min(ws.max_row, header_row)
+
+    for r in range(scan_from, scan_to + 1):
+        for c in range(1, ws.max_column + 1):
+            tri = normalize_trimester_label(get_effective_cell_value(ws, r, c))
+            if tri:
+                groups[tri] = c
+
+    inferred = {}
+    for tri, start_col in groups.items():
+        inferred[tri] = {
+            "Avance": start_col,
+            "Descripción": start_col + 1,
+            "Cantidad": start_col + 2,
+            "Evidencia": start_col + 3,
+        }
+
+    if inferred:
+        return inferred
+
+    # Fallback: detectar grupos por repetición horizontal de encabezados
+    cols_avance = []
+    for c in range(1, ws.max_column + 1):
+        t = normalize_text(get_effective_cell_value(ws, header_row, c))
+        if any(k in t for k in KEY_HEADER_AVANCE):
+            cols_avance.append(c)
+
+    for i, col in enumerate(cols_avance[:4]):
+        tri = TRIMESTRES_ORDEN[i]
+        inferred[tri] = {
+            "Avance": col,
+            "Descripción": col + 1,
+            "Cantidad": col + 2,
+            "Evidencia": col + 3,
+        }
+
+    return inferred
 
 
 def normalize_status_value(value):
@@ -665,73 +681,99 @@ def normalize_status_value(value):
     return clean_text(value)
 
 
-def extract_table(ws, header_row, block_end_row):
-    columns = [
-        "Indicador",
-        "Meta (editable)",
-        "Avance (Editable)",
-        "Descripción (editable)",
-        "Cantidad (editable)",
-        "Observaciones (Editable)"
-    ]
+def extract_trimester_tables(ws, header_row, block_end_row):
+    base_cols = find_base_columns(ws, header_row)
+    trimester_groups = detect_trimester_groups(ws, header_row, header_row, block_end_row)
 
-    header_map = map_headers(ws, header_row)
+    tablas = {tri: [] for tri in TRIMESTRES_ORDEN}
 
-    if "Indicador" not in header_map:
-        return pd.DataFrame([{
-            "Indicador": "",
-            "Meta (editable)": "",
-            "Avance (Editable)": "",
-            "Descripción (editable)": "",
-            "Cantidad (editable)": "",
-            "Observaciones (Editable)": ""
-        }])
+    if base_cols["Indicador"] is None:
+        return {tri: pd.DataFrame(columns=[
+            "Indicador",
+            "Meta (editable)",
+            "Avance (Editable)",
+            "Descripción (editable)",
+            "Cantidad (editable)",
+            "Evidencia (editable)",
+        ]) for tri in TRIMESTRES_ORDEN}
 
-    data = []
     empty_count = 0
 
     for r in range(header_row + 1, block_end_row + 1):
-        row_data = {}
+        indicador = get_effective_cell_value(ws, r, base_cols["Indicador"]) if base_cols["Indicador"] else ""
+        indicador_txt = "" if indicador is None else str(indicador).strip()
 
-        indicador = get_effective_cell_value(ws, r, header_map.get("Indicador")) if header_map.get("Indicador") else ""
-        meta = get_effective_cell_value(ws, r, header_map.get("Meta (editable)")) if header_map.get("Meta (editable)") else ""
-        avance = get_effective_cell_value(ws, r, header_map.get("Avance (Editable)")) if header_map.get("Avance (Editable)") else ""
-        descripcion = get_effective_cell_value(ws, r, header_map.get("Descripción (editable)")) if header_map.get("Descripción (editable)") else ""
-        cantidad = get_effective_cell_value(ws, r, header_map.get("Cantidad (editable)")) if header_map.get("Cantidad (editable)") else ""
-        observaciones = get_effective_cell_value(ws, r, header_map.get("Observaciones (Editable)")) if header_map.get("Observaciones (Editable)") else ""
+        meta = get_effective_cell_value(ws, r, base_cols["Meta"]) if base_cols["Meta"] else ""
+        meta_txt = "" if meta is None else str(meta).strip()
 
-        row_data["Indicador"] = "" if indicador is None else str(indicador)
-        row_data["Meta (editable)"] = "" if meta is None else str(meta)
-        row_data["Avance (Editable)"] = "" if avance is None else normalize_status_value(avance)
-        row_data["Descripción (editable)"] = "" if descripcion is None else str(descripcion)
-        row_data["Cantidad (editable)"] = "" if cantidad is None else str(cantidad)
-        row_data["Observaciones (Editable)"] = "" if observaciones is None else str(observaciones)
+        # revisar si la fila ya no tiene nada útil
+        row_has_any = False
+        for tri in TRIMESTRES_ORDEN:
+            group = trimester_groups.get(tri, {})
+            avance = get_effective_cell_value(ws, r, group.get("Avance")) if group.get("Avance") else ""
+            descripcion = get_effective_cell_value(ws, r, group.get("Descripción")) if group.get("Descripción") else ""
+            cantidad = get_effective_cell_value(ws, r, group.get("Cantidad")) if group.get("Cantidad") else ""
+            evidencia = get_effective_cell_value(ws, r, group.get("Evidencia")) if group.get("Evidencia") else ""
 
-        has_content = any(str(v).strip() != "" for v in row_data.values())
+            if any(is_nonempty(v) for v in [indicador_txt, meta_txt, avance, descripcion, cantidad, evidencia]):
+                row_has_any = True
+                break
 
-        if not has_content:
+        if not row_has_any:
             empty_count += 1
             if empty_count >= 5:
                 break
             continue
 
-        if normalize_text(row_data["Indicador"]) in ["indicador", "indicadores"]:
+        empty_count = 0
+
+        if normalize_text(indicador_txt) in ["indicador", "indicadores"]:
             continue
 
-        empty_count = 0
-        data.append(row_data)
+        if normalize_text(indicador_txt) == "":
+            continue
 
-    if not data:
-        return pd.DataFrame([{
-            "Indicador": "",
-            "Meta (editable)": "",
-            "Avance (Editable)": "",
-            "Descripción (editable)": "",
-            "Cantidad (editable)": "",
-            "Observaciones (Editable)": ""
-        }])
+        for tri in TRIMESTRES_ORDEN:
+            group = trimester_groups.get(tri, {})
 
-    return pd.DataFrame(data, columns=columns)
+            avance = get_effective_cell_value(ws, r, group.get("Avance")) if group.get("Avance") else ""
+            descripcion = get_effective_cell_value(ws, r, group.get("Descripción")) if group.get("Descripción") else ""
+            cantidad = get_effective_cell_value(ws, r, group.get("Cantidad")) if group.get("Cantidad") else ""
+            evidencia = get_effective_cell_value(ws, r, group.get("Evidencia")) if group.get("Evidencia") else ""
+
+            row_data = {
+                "Indicador": indicador_txt,
+                "Meta (editable)": meta_txt,
+                "Avance (Editable)": "" if avance is None else normalize_status_value(avance),
+                "Descripción (editable)": "" if descripcion is None else str(descripcion),
+                "Cantidad (editable)": "" if cantidad is None else str(cantidad),
+                "Evidencia (editable)": "" if evidencia is None else str(evidencia),
+            }
+
+            if any(str(v).strip() != "" for v in row_data.values()):
+                tablas[tri].append(row_data)
+
+    result = {}
+    for tri in TRIMESTRES_ORDEN:
+        if tablas[tri]:
+            result[tri] = pd.DataFrame(tablas[tri], columns=[
+                "Indicador",
+                "Meta (editable)",
+                "Avance (Editable)",
+                "Descripción (editable)",
+                "Cantidad (editable)",
+                "Evidencia (editable)",
+            ])
+        else:
+            result[tri] = pd.DataFrame(columns=[
+                "Indicador",
+                "Meta (editable)",
+                "Avance (Editable)",
+                "Descripción (editable)",
+                "Cantidad (editable)",
+                "Evidencia (editable)",
+            ])
+    return result
 
 
 def prepare_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -743,7 +785,7 @@ def prepare_editor_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         "Avance (Editable)",
         "Descripción (editable)",
         "Cantidad (editable)",
-        "Observaciones (Editable)"
+        "Evidencia (editable)",
     ]
 
     for col in expected_columns:
@@ -805,28 +847,22 @@ def extract_blocks_from_sheet(ws):
             value_blacklist=["lider", "trimestre", "indicador", "meta", "problematica"]
         )
 
-        trimestre = detect_trimester(
-            ws=ws,
-            start_row=start_row,
-            end_row=min(start_row + 12, end_row)
-        )
-
         header_row = detect_header_row(
             ws=ws,
             start_row=start_row,
             end_row=min(start_row + 35, end_row)
         )
 
-        tabla = extract_table(ws, header_row, end_row) if header_row else pd.DataFrame([{
-            "Indicador": "",
-            "Meta (editable)": "",
-            "Avance (Editable)": "",
-            "Descripción (editable)": "",
-            "Cantidad (editable)": "",
-            "Observaciones (Editable)": ""
-        }])
-
-        tabla = prepare_editor_dataframe(tabla)
+        tablas_por_trimestre = extract_trimester_tables(ws, header_row, end_row) if header_row else {
+            tri: pd.DataFrame(columns=[
+                "Indicador",
+                "Meta (editable)",
+                "Avance (Editable)",
+                "Descripción (editable)",
+                "Cantidad (editable)",
+                "Evidencia (editable)",
+            ]) for tri in TRIMESTRES_ORDEN
+        }
 
         problematica_final = clean_text(problematica)
         lider_final = clean_text(lider)
@@ -837,8 +873,7 @@ def extract_blocks_from_sheet(ws):
             "linea_accion": str(linea_numero).strip(),
             "problematica": problematica_final if problematica_final else "Sin nombre en Excel",
             "lider": lider_final if lider_final else "",
-            "trimestre": clean_text(trimestre),
-            "tabla": tabla,
+            "tablas_por_trimestre": {tri: prepare_editor_dataframe(tablas_por_trimestre[tri]) for tri in TRIMESTRES_ORDEN},
             "rango_inicio": start_row,
             "rango_fin": end_row,
             "header_row": header_row,
@@ -848,7 +883,7 @@ def extract_blocks_from_sheet(ws):
     # filtrar líneas fantasma
     blocks_filtrados = []
     for b in blocks:
-        if dataframe_has_real_content(b["tabla"]):
+        if any(dataframe_has_real_content(b["tablas_por_trimestre"][tri]) for tri in TRIMESTRES_ORDEN):
             blocks_filtrados.append(b)
 
     return {
@@ -886,13 +921,13 @@ def compute_line_metrics(df: pd.DataFrame) -> dict:
 
     if porcentaje >= 80:
         estado = "Alto"
-        color = "#1B5E20"   # verde
+        color = "#1B5E20"
     elif porcentaje >= 50:
         estado = "Medio"
-        color = "#EF6C00"   # naranja
+        color = "#EF6C00"
     else:
         estado = "Bajo"
-        color = "#B71C1C"   # rojo
+        color = "#B71C1C"
 
     return {
         "total": total,
@@ -909,21 +944,22 @@ def build_summary_dataframe(data_lineas):
     rows = []
 
     for _, item in data_lineas.items():
-        df = item["tabla"].copy()
-        m = compute_line_metrics(df)
+        for tri in TRIMESTRES_ORDEN:
+            df = prepare_editor_dataframe(item["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+            m = compute_line_metrics(df)
 
-        rows.append({
-            "Línea": item.get("display_linea", ""),
-            "Problemática": item["info"].get("problematica", ""),
-            "Líder Estratégico": item["info"].get("lider", ""),
-            "Trimestre": item.get("trimestre", ""),
-            "Indicadores": m["total"],
-            "Completado": m["completos"],
-            "Con Actividades": m["con_actividades"],
-            "Sin Actividades": m["sin_actividades"],
-            "% Avance": m["porcentaje"],
-            "Semáforo": m["estado"],
-        })
+            rows.append({
+                "Línea": item.get("display_linea", ""),
+                "Problemática": item["info"].get("problematica", ""),
+                "Líder Estratégico": item["info"].get("lider", ""),
+                "Trimestre": tri,
+                "Indicadores": m["total"],
+                "Completado": m["completos"],
+                "Con Actividades": m["con_actividades"],
+                "Sin Actividades": m["sin_actividades"],
+                "% Avance": m["porcentaje"],
+                "Semáforo": m["estado"],
+            })
 
     return pd.DataFrame(rows)
 
@@ -941,31 +977,32 @@ def build_excel_export(data_lineas, delegacion_general, fecha_actualizacion=""):
         linea = item.get("display_linea", "")
         problematica = item["info"].get("problematica", "")
         lider = item["info"].get("lider", "")
-        trimestre = item.get("trimestre", "")
-        df = prepare_editor_dataframe(item["tabla"])
 
-        for i, (_, row) in enumerate(df.iterrows(), start=1):
-            detalle_rows.append({
-                "Delegación": delegacion_general,
-                "Fecha de actualización": fecha_actualizacion,
-                "Línea": linea,
-                "Item": f"{linea}.{i}",
-                "Problemática": problematica,
-                "Líder Estratégico": lider,
-                "Trimestre": trimestre,
-                "Indicador": row.get("Indicador", ""),
-                "Meta": row.get("Meta (editable)", ""),
-                "Avance": row.get("Avance (Editable)", ""),
-                "Descripción": row.get("Descripción (editable)", ""),
-                "Cantidad": row.get("Cantidad (editable)", ""),
-                "Observaciones": row.get("Observaciones (Editable)", ""),
-            })
+        for tri in TRIMESTRES_ORDEN:
+            df = prepare_editor_dataframe(item["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+
+            for i, (_, row) in enumerate(df.iterrows(), start=1):
+                detalle_rows.append({
+                    "Delegación": delegacion_general,
+                    "Fecha de actualización": fecha_actualizacion,
+                    "Línea": linea,
+                    "Trimestre": tri,
+                    "Item": f"{linea}.{tri}.{i}",
+                    "Problemática": problematica,
+                    "Líder Estratégico": lider,
+                    "Indicador": row.get("Indicador", ""),
+                    "Meta": row.get("Meta (editable)", ""),
+                    "Avance": row.get("Avance (Editable)", ""),
+                    "Descripción": row.get("Descripción (editable)", ""),
+                    "Cantidad": row.get("Cantidad (editable)", ""),
+                    "Evidencia": row.get("Evidencia (editable)", ""),
+                })
 
     detalle_df = pd.DataFrame(detalle_rows)
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         resumen.to_excel(writer, index=False, sheet_name="Resumen")
-        detalle_df.to_excel(writer, index=False, sheet_name="Detalle")
+        detalle_df.to_excel(writer, index=False, sheet_name="Detalle por trimestre")
 
         meta_df = pd.DataFrame([{
             "Delegación": delegacion_general,
@@ -1055,8 +1092,8 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
     small_style = ParagraphStyle(
         "small_custom",
         parent=styles["Normal"],
-        fontSize=7.6,
-        leading=9
+        fontSize=7.2,
+        leading=8.5
     )
 
     heading_style = ParagraphStyle(
@@ -1070,9 +1107,6 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
 
     elements = []
 
-    # =========================================
-    # PORTADA
-    # =========================================
     logo_path = get_logo_path()
     elements.append(Spacer(1, 35))
 
@@ -1116,27 +1150,23 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
 
     intro = (
         "Este informe presenta el seguimiento trimestral de las líneas de acción registradas, "
-        "con una estructura que permite visualizar de forma clara el estado de avance, la "
-        "descripción operativa, la cantidad reportada y las observaciones asociadas a cada indicador. "
-        "La información se organiza por línea de acción, incorporando un resumen ejecutivo, "
-        "semáforo de avance y detalle consolidado para facilitar la revisión y la toma de decisiones."
+        "mostrando el detalle por trimestre, las evidencias asociadas, el estado de avance y "
+        "la información consolidada por línea de acción para facilitar la revisión y la toma de decisiones."
     )
     elements.append(Paragraph(intro, normal_style))
     elements.append(PageBreak())
 
-    # =========================================
-    # RESUMEN EJECUTIVO
-    # =========================================
     elements.append(Paragraph("RESUMEN EJECUTIVO", heading_style))
     resumen_df = build_summary_dataframe(data_lineas)
 
     resumen_table_data = [[
-        "Línea", "Problemática", "Indicadores", "% Avance", "Semáforo"
+        "Línea", "Trimestre", "Problemática", "Indicadores", "% Avance", "Semáforo"
     ]]
 
     for _, row in resumen_df.iterrows():
         resumen_table_data.append([
             Paragraph(safe_str(row.get("Línea", "")), small_style),
+            Paragraph(safe_str(row.get("Trimestre", "")), small_style),
             Paragraph(safe_str(row.get("Problemática", "")), small_style),
             Paragraph(safe_str(row.get("Indicadores", "")), small_style),
             Paragraph(safe_str(row.get("% Avance", "")), small_style),
@@ -1146,7 +1176,7 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
     resumen_table = Table(
         resumen_table_data,
         repeatRows=1,
-        colWidths=[50, 250, 70, 70, 80]
+        colWidths=[42, 55, 205, 60, 60, 70]
     )
     resumen_table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
@@ -1162,94 +1192,95 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
     elements.append(resumen_table)
     elements.append(Spacer(1, 16))
 
-    # =========================================
-    # DETALLE POR LÍNEA
-    # =========================================
     for key, item in data_lineas.items():
         info = item["info"]
-        df = prepare_editor_dataframe(item["tabla"])
-        trimestre = item.get("trimestre", "")
         display_linea = item.get("display_linea", key)
-        metrics = compute_line_metrics(df)
 
         elements.append(Paragraph(f"LÍNEA DE ACCIÓN {safe_str(display_linea)}", heading_style))
         elements.append(Paragraph(f"<b>Problemática:</b> {safe_str(info.get('problematica', ''))}", normal_style))
         elements.append(Paragraph(f"<b>Líder Estratégico:</b> {safe_str(info.get('lider', ''))}", normal_style))
-        elements.append(Paragraph(f"<b>Trimestre:</b> {safe_str(trimestre)}", normal_style))
         elements.append(Spacer(1, 6))
 
-        metric_table = Table([
-            ["Indicadores", str(metrics["total"]), "Completado", str(metrics["completos"])],
-            ["Con Actividades", str(metrics["con_actividades"]), "Sin Actividades", str(metrics["sin_actividades"])],
-        ], colWidths=[120, 60, 120, 60])
+        for tri in TRIMESTRES_ORDEN:
+            df = prepare_editor_dataframe(item["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+            metrics = compute_line_metrics(df)
 
-        metric_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F5F5")),
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EF6C00")),
-            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#1B5E20")),
-            ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
-            ("TEXTCOLOR", (2, 0), (2, -1), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
-            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]))
+            elements.append(Paragraph(f"<b>{tri} Trimestre</b>", normal_style))
 
-        elements.append(metric_table)
-        elements.append(Spacer(1, 8))
+            metric_table = Table([
+                ["Indicadores", str(metrics["total"]), "Completado", str(metrics["completos"])],
+                ["Con Actividades", str(metrics["con_actividades"]), "Sin Actividades", str(metrics["sin_actividades"])],
+            ], colWidths=[120, 60, 120, 60])
 
-        progress_and_semaforo = Table([
-            [draw_progress_bar(metrics["porcentaje"], fill_color=metrics["color"]), draw_semaforo(metrics["estado"], metrics["color"])]
-        ], colWidths=[300, 180])
+            metric_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F5F5")),
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EF6C00")),
+                ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#1B5E20")),
+                ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+                ("TEXTCOLOR", (2, 0), (2, -1), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ]))
 
-        progress_and_semaforo.setStyle(TableStyle([
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(progress_and_semaforo)
-        elements.append(Spacer(1, 10))
+            elements.append(metric_table)
+            elements.append(Spacer(1, 8))
 
-        table_data = [[
-            "Ítem", "Indicador", "Meta", "Avance", "Descripción", "Cantidad", "Observaciones"
-        ]]
+            progress_and_semaforo = Table([
+                [draw_progress_bar(metrics["porcentaje"], fill_color=metrics["color"]), draw_semaforo(metrics["estado"], metrics["color"])]
+            ], colWidths=[300, 180])
 
-        for i, (_, row) in enumerate(df.iterrows(), start=1):
-            item_num = f"{display_linea}.{i}"
-            table_data.append([
-                Paragraph(item_num, small_style),
-                Paragraph(safe_str(row.get("Indicador", "")), small_style),
-                Paragraph(safe_str(row.get("Meta (editable)", "")), small_style),
-                Paragraph(safe_str(row.get("Avance (Editable)", "")), small_style),
-                Paragraph(safe_str(row.get("Descripción (editable)", "")), small_style),
-                Paragraph(safe_str(row.get("Cantidad (editable)", "")), small_style),
-                Paragraph(safe_str(row.get("Observaciones (Editable)", "")), small_style),
-            ])
+            progress_and_semaforo.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]))
+            elements.append(progress_and_semaforo)
+            elements.append(Spacer(1, 10))
 
-        table = Table(
-            table_data,
-            repeatRows=1,
-            colWidths=[34, 92, 55, 62, 120, 50, 117]
-        )
+            table_data = [[
+                "Ítem", "Indicador", "Meta", "Avance", "Descripción", "Cantidad", "Evidencia"
+            ]]
 
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.1),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
-        ]))
+            for i, (_, row) in enumerate(df.iterrows(), start=1):
+                item_num = f"{display_linea}.{tri}.{i}"
+                table_data.append([
+                    Paragraph(item_num, small_style),
+                    Paragraph(safe_str(row.get("Indicador", "")), small_style),
+                    Paragraph(safe_str(row.get("Meta (editable)", "")), small_style),
+                    Paragraph(safe_str(row.get("Avance (Editable)", "")), small_style),
+                    Paragraph(safe_str(row.get("Descripción (editable)", "")), small_style),
+                    Paragraph(safe_str(row.get("Cantidad (editable)", "")), small_style),
+                    Paragraph(safe_str(row.get("Evidencia (editable)", "")), small_style),
+                ])
 
-        elements.append(KeepTogether([table]))
-        elements.append(Spacer(1, 14))
+            table = Table(
+                table_data,
+                repeatRows=1,
+                colWidths=[42, 85, 48, 58, 115, 45, 122]
+            )
+
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1B5E20")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7.0),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F9FC")]),
+            ]))
+
+            elements.append(KeepTogether([table]))
+            elements.append(Spacer(1, 14))
+
+        elements.append(PageBreak())
 
     doc.build(elements)
     pdf_bytes = buffer.getvalue()
@@ -1262,7 +1293,7 @@ def build_pdf_all_lines(data_lineas, delegacion_general, fecha_actualizacion="")
 # =========================================================
 st.markdown('<div class="main-title">Seguimiento de líneas de acción</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="sub-note">Sube un archivo Excel (.xlsm o .xlsx). La app localizará de forma robusta la delegación, línea de acción, problemática, líder estratégico, trimestre y el detalle editable de indicadores.</div>',
+    '<div class="sub-note">Sube un archivo Excel (.xlsm o .xlsx). La app localizará de forma robusta la delegación, línea de acción, problemática, líder estratégico, la fecha editable y el detalle por trimestre con evidencias.</div>',
     unsafe_allow_html=True
 )
 
@@ -1279,6 +1310,7 @@ if uploaded_file is not None:
             st.session_state["pdf_final"] = None
             st.session_state["excel_final"] = None
             st.session_state["ultimo_resumen"] = pd.DataFrame()
+            st.session_state["fecha_actualizacion_editable"] = ""
 
         file_bytes = uploaded_file.read()
 
@@ -1296,6 +1328,9 @@ if uploaded_file is not None:
         delegacion = extraction["delegacion"]
         fecha_actualizacion = extraction["fecha_actualizacion"]
         blocks = extraction["blocks"]
+
+        if not st.session_state["fecha_actualizacion_editable"]:
+            st.session_state["fecha_actualizacion_editable"] = fecha_actualizacion
 
         if not blocks:
             st.warning("No se encontraron bloques reales de líneas de acción en la hoja cargada.")
@@ -1320,7 +1355,7 @@ if uploaded_file is not None:
             )
         with col_k4:
             st.markdown(
-                f'<div class="kpi-box"><b>Fecha actualización</b><br>{safe_str(fecha_actualizacion) or "-"}</div>',
+                f'<div class="kpi-box"><b>Fecha actualización</b><br>{safe_str(st.session_state["fecha_actualizacion_editable"]) or "-"}</div>',
                 unsafe_allow_html=True
             )
 
@@ -1338,12 +1373,12 @@ if uploaded_file is not None:
             )
 
         with g2:
-            st.text_input(
+            nueva_fecha = st.text_input(
                 "Fecha de actualización",
-                value=fecha_actualizacion,
-                disabled=True,
+                value=st.session_state["fecha_actualizacion_editable"],
                 key="fecha_actualizacion_general"
             )
+            st.session_state["fecha_actualizacion_editable"] = nueva_fecha
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1352,7 +1387,7 @@ if uploaded_file is not None:
             st.write(f"**Archivo:** {uploaded_file.name}")
             st.write(f"**Hoja detectada:** {main_sheet}")
             st.write(f"**Delegación:** {delegacion or '-'}")
-            st.write(f"**Fecha de actualización:** {fecha_actualizacion or '-'}")
+            st.write(f"**Fecha de actualización:** {st.session_state['fecha_actualizacion_editable'] or '-'}")
             st.write(f"**Líneas encontradas:** {len(blocks)}")
             st.divider()
 
@@ -1371,13 +1406,15 @@ if uploaded_file is not None:
             save_key = f"{idx}_{linea_id}"
 
             if save_key in st.session_state["lineas_guardadas"]:
-                df_base = st.session_state["lineas_guardadas"][save_key]["tabla"].copy()
-                trim_base = st.session_state["lineas_guardadas"][save_key]["trimestre"]
+                tablas_base = {
+                    tri: prepare_editor_dataframe(st.session_state["lineas_guardadas"][save_key]["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+                    for tri in TRIMESTRES_ORDEN
+                }
             else:
-                df_base = bloque["tabla"].copy()
-                trim_base = bloque["trimestre"] if bloque["trimestre"] in ["", "I", "II", "III", "IV"] else ""
-
-            df_base = prepare_editor_dataframe(df_base)
+                tablas_base = {
+                    tri: prepare_editor_dataframe(bloque["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+                    for tri in TRIMESTRES_ORDEN
+                }
 
             st.markdown('<div class="line-card">', unsafe_allow_html=True)
             st.markdown(f'<div class="section-title">Línea {safe_str(linea_id)}</div>', unsafe_allow_html=True)
@@ -1412,52 +1449,50 @@ if uploaded_file is not None:
             if bloque.get("nombre_vacio_en_origen"):
                 st.warning(f"La línea {linea_id} viene sin nombre en el Excel original.")
 
-            c4, c5 = st.columns([1.2, 5])
-
-            with c4:
-                trim_options = ["", "I", "II", "III", "IV"]
-                selected_trim = st.selectbox(
-                    "Trimestre",
-                    trim_options,
-                    index=trim_options.index(trim_base if trim_base in trim_options else ""),
-                    key=f"trim_{block_key}"
-                )
-
-            with c5:
-                st.caption(
-                    f"Filas detectadas del bloque: {bloque['rango_inicio']} a {bloque['rango_fin']} | "
-                    f"Encabezado detectado: {bloque['header_row'] if bloque['header_row'] else '-'}"
-                )
-
-            m = compute_line_metrics(df_base)
-            s1, s2, s3, s4, s5 = st.columns(5)
-            s1.metric("Indicadores", m["total"])
-            s2.metric("Completado", m["completos"])
-            s3.metric("Con Actividades", m["con_actividades"])
-            s4.metric("Sin Actividades", m["sin_actividades"])
-            s5.metric("% Avance", f"{m['porcentaje']}%")
-
-            st.markdown("#### Detalle editable")
-
-            df_editado = st.data_editor(
-                df_base,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic",
-                key=f"tabla_{block_key}",
-                column_config={
-                    "Indicador": st.column_config.TextColumn("Indicador", width="medium"),
-                    "Meta (editable)": st.column_config.TextColumn("Meta (editable)", width="medium"),
-                    "Avance (Editable)": st.column_config.SelectboxColumn(
-                        "Avance (Editable)",
-                        options=["", "Completado", "Con Actividades", "Sin Actividades"],
-                        width="small"
-                    ),
-                    "Descripción (editable)": st.column_config.TextColumn("Descripción (editable)", width="large"),
-                    "Cantidad (editable)": st.column_config.TextColumn("Cantidad (editable)", width="small"),
-                    "Observaciones (Editable)": st.column_config.TextColumn("Observaciones (Editable)", width="large"),
-                }
+            st.caption(
+                f"Filas detectadas del bloque: {bloque['rango_inicio']} a {bloque['rango_fin']} | "
+                f"Encabezado detectado: {bloque['header_row'] if bloque['header_row'] else '-'}"
             )
+
+            tabs = st.tabs([f"{tri} Trimestre" for tri in TRIMESTRES_ORDEN])
+
+            edited_tables = {}
+
+            for tri, tab in zip(TRIMESTRES_ORDEN, tabs):
+                with tab:
+                    df_base = prepare_editor_dataframe(tablas_base.get(tri, pd.DataFrame()))
+                    m = compute_line_metrics(df_base)
+
+                    s1, s2, s3, s4, s5 = st.columns(5)
+                    s1.metric("Indicadores", m["total"])
+                    s2.metric("Completado", m["completos"])
+                    s3.metric("Con Actividades", m["con_actividades"])
+                    s4.metric("Sin Actividades", m["sin_actividades"])
+                    s5.metric("% Avance", f"{m['porcentaje']}%")
+
+                    st.markdown(f"#### Detalle editable — {tri} Trimestre")
+
+                    df_editado = st.data_editor(
+                        df_base,
+                        use_container_width=True,
+                        hide_index=True,
+                        num_rows="dynamic",
+                        key=f"tabla_{block_key}_{tri}",
+                        column_config={
+                            "Indicador": st.column_config.TextColumn("Indicador", width="medium"),
+                            "Meta (editable)": st.column_config.TextColumn("Meta (editable)", width="medium"),
+                            "Avance (Editable)": st.column_config.SelectboxColumn(
+                                "Avance (Editable)",
+                                options=["", "Completado", "Con Actividades", "Sin Actividades"],
+                                width="small"
+                            ),
+                            "Descripción (editable)": st.column_config.TextColumn("Descripción (editable)", width="large"),
+                            "Cantidad (editable)": st.column_config.TextColumn("Cantidad (editable)", width="small"),
+                            "Evidencia (editable)": st.column_config.TextColumn("Evidencia (editable)", width="large"),
+                        }
+                    )
+
+                    edited_tables[tri] = prepare_editor_dataframe(df_editado)
 
             btn1, btn2 = st.columns([2.3, 5])
 
@@ -1473,8 +1508,7 @@ if uploaded_file is not None:
                             "rango_inicio": bloque["rango_inicio"],
                             "rango_fin": bloque["rango_fin"],
                         },
-                        "tabla": prepare_editor_dataframe(df_editado),
-                        "trimestre": selected_trim
+                        "tablas_por_trimestre": edited_tables
                     }
                     st.session_state["pdf_final"] = None
                     st.session_state["excel_final"] = None
@@ -1502,13 +1536,13 @@ if uploaded_file is not None:
                     block_key = f"bloque_{idx}_{linea_id}"
                     save_key = f"{idx}_{linea_id}"
 
-                    trim_value = st.session_state.get(f"trim_{block_key}", bloque["trimestre"])
-                    tabla_value = st.session_state.get(f"tabla_{block_key}", bloque["tabla"])
-
-                    if isinstance(tabla_value, pd.DataFrame):
-                        tabla_guardar = prepare_editor_dataframe(tabla_value)
-                    else:
-                        tabla_guardar = prepare_editor_dataframe(bloque["tabla"])
+                    tablas_guardar = {}
+                    for tri in TRIMESTRES_ORDEN:
+                        tabla_value = st.session_state.get(f"tabla_{block_key}_{tri}", bloque["tablas_por_trimestre"].get(tri, pd.DataFrame()))
+                        if isinstance(tabla_value, pd.DataFrame):
+                            tablas_guardar[tri] = prepare_editor_dataframe(tabla_value)
+                        else:
+                            tablas_guardar[tri] = prepare_editor_dataframe(bloque["tablas_por_trimestre"].get(tri, pd.DataFrame()))
 
                     st.session_state["lineas_guardadas"][save_key] = {
                         "display_linea": linea_id,
@@ -1520,8 +1554,7 @@ if uploaded_file is not None:
                             "rango_inicio": bloque["rango_inicio"],
                             "rango_fin": bloque["rango_fin"],
                         },
-                        "tabla": tabla_guardar,
-                        "trimestre": trim_value if trim_value in ["", "I", "II", "III", "IV"] else ""
+                        "tablas_por_trimestre": tablas_guardar
                     }
 
                 st.session_state["pdf_final"] = None
@@ -1543,7 +1576,7 @@ if uploaded_file is not None:
         else:
             st.info("Todavía no has guardado ninguna línea.")
 
-        st.markdown("## Resumen consolidado")
+        st.markdown("## Resumen consolidado por trimestre")
 
         if st.session_state["lineas_guardadas"]:
             df_summary = build_summary_dataframe(st.session_state["lineas_guardadas"])
@@ -1564,7 +1597,7 @@ if uploaded_file is not None:
                     pdf_bytes = build_pdf_all_lines(
                         st.session_state["lineas_guardadas"],
                         delegacion_general=delegacion,
-                        fecha_actualizacion=fecha_actualizacion
+                        fecha_actualizacion=st.session_state["fecha_actualizacion_editable"]
                     )
                     st.session_state["pdf_final"] = pdf_bytes
                     st.success("PDF generado correctamente.")
@@ -1577,7 +1610,7 @@ if uploaded_file is not None:
                     excel_bytes = build_excel_export(
                         st.session_state["lineas_guardadas"],
                         delegacion_general=delegacion,
-                        fecha_actualizacion=fecha_actualizacion
+                        fecha_actualizacion=st.session_state["fecha_actualizacion_editable"]
                     )
                     st.session_state["excel_final"] = excel_bytes
                     st.success("Excel generado correctamente.")
@@ -1601,12 +1634,15 @@ if uploaded_file is not None:
         with st.expander("Resumen técnico de detección"):
             debug_rows = []
             for b in blocks:
+                conteos = {tri: len(b["tablas_por_trimestre"].get(tri, pd.DataFrame())) for tri in TRIMESTRES_ORDEN}
                 debug_rows.append({
                     "Línea": b["linea_accion"],
                     "Problemática": b["problematica"],
                     "Líder": b["lider"],
-                    "Trimestre detectado": b["trimestre"],
-                    "Filas detalle": len(b["tabla"]),
+                    "I Trimestre filas": conteos["I"],
+                    "II Trimestre filas": conteos["II"],
+                    "III Trimestre filas": conteos["III"],
+                    "IV Trimestre filas": conteos["IV"],
                     "Fila inicio": b["rango_inicio"],
                     "Fila fin": b["rango_fin"],
                     "Fila encabezado": b["header_row"],
